@@ -97,6 +97,7 @@ def get_client():
 
 client = get_client()
 
+# ---------- Session state (safe even for sessions started earlier) ----------
 if "chat" not in st.session_state:
     st.session_state.chat = client.chats.create(
         model=MODEL,
@@ -104,13 +105,13 @@ if "chat" not in st.session_state:
             system_instruction="You are a patient exam and homework tutor for students. When a student asks about a topic, explain it simply in small steps with one clear example. Then give one practice question and wait for their answer. If they are wrong, hint first and explain the mistake kindly. If they ask for a quiz, give 5 questions, one at a time. If they paste a homework question, guide them to the answer rather than just stating it. Keep replies short and encouraging."
         ),
     )
-    st.session_state.messages = []
-    st.session_state.last_audio = None
-    st.session_state.used = 0
-    st.session_state.unlocked = False
-    st.session_state.pending_voice = None
-    st.session_state.to_send = ""
-    st.session_state.draft = ""
+st.session_state.setdefault("messages", [])
+st.session_state.setdefault("last_audio", None)
+st.session_state.setdefault("used", 0)
+st.session_state.setdefault("unlocked", False)
+st.session_state.setdefault("pending_voice", None)
+st.session_state.setdefault("to_send", "")
+st.session_state.setdefault("draft", "")
 
 def submit_draft():
     text = st.session_state.get("draft", "").strip()
@@ -227,7 +228,7 @@ with chat_box:
                 f'<div class="row-bot"><div class="bubble-bot">{safe}</div></div>',
                 unsafe_allow_html=True,
             )
-    if st.session_state.pending_voice:
+    if st.session_state.get("pending_voice"):
         st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
         st.session_state.pending_voice = None
 
