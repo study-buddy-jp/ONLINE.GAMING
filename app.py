@@ -10,7 +10,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-MODEL = "gemini-flash-latest"          # chat model
+MODEL = "gemini-flash-lite-latest"          # chat model
 TRANSCRIBE_MODEL = "gemini-flash-latest"    # speech to text
 TTS_MODEL = "gemini-2.5-flash-preview-tts"  # text to speech (voice replies)
 VOICE_NAME = "Kore"
