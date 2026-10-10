@@ -1,6 +1,7 @@
 import os
 import html
 import hashlib
+from pathlib import Path
 import streamlit as st
 from google import genai
 from google.genai import types
@@ -32,11 +33,17 @@ st.markdown("""
     max-width: 80%;
     line-height: 1.5;
 }
-h1 { color: #6C63FF; text-align: center; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📚 Study Buddy AI")
+# Header: logo beside the title
+col1, col2 = st.columns([1, 6], vertical_alignment="center")
+with col1:
+    logo = Path(__file__).parent / "logo.jpg"
+    if logo.exists():
+        st.image(str(logo), width=70)
+with col2:
+    st.markdown("<h1 style='margin:0; color:#6C63FF;'>Study Buddy AI</h1>", unsafe_allow_html=True)
 st.caption("Ask me anything about your studies. Type or speak.")
 
 def get_secret(name, default=""):
