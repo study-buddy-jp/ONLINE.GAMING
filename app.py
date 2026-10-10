@@ -25,58 +25,61 @@ st.markdown("""
 <style>
 #MainMenu, footer, header[data-testid="stHeader"] { visibility: hidden; }
 .stApp { background: #F4FAF9; }
-.block-container { max-width: 780px; padding-top: 1.5rem; }
+.block-container { max-width: 780px; padding-top: 1rem; padding-bottom: 1rem; }
+
+div[data-testid="stVerticalBlock"] { gap: 0.5rem; }
+div[data-testid="stMarkdownContainer"] p { margin-bottom: 0; }
 
 /* Header card */
 .brand {
     display: flex; align-items: center; gap: 14px;
     background: linear-gradient(135deg, #0F766E 0%, #115E59 100%);
-    border-radius: 18px; padding: 16px 20px; margin-bottom: 14px;
-    box-shadow: 0 6px 18px rgba(15, 118, 110, 0.18);
+    border-radius: 16px; padding: 12px 18px; margin-bottom: 8px;
+    box-shadow: 0 4px 14px rgba(15, 118, 110, 0.18);
 }
-.brand-title { color: #FFFFFF; font-size: 1.5rem; font-weight: 700; margin: 0; letter-spacing: 0.2px; }
-.brand-sub { color: #CCFBF1; font-size: 0.92rem; margin: 2px 0 0 0; }
+.brand-title { color: #FFFFFF; font-size: 1.3rem; font-weight: 700; margin: 0; }
+.brand-sub { color: #CCFBF1; font-size: 0.88rem; margin: 2px 0 0 0; }
 .brand-badge {
     margin-left: auto; background: #FDE68A; color: #78350F;
-    font-size: 0.72rem; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+    font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px;
 }
 
-/* Chat rows with avatars */
-.row { display: flex; align-items: flex-end; gap: 10px; margin: 10px 0; }
+/* Chat rows */
+.row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
 .row-bot { justify-content: flex-start; }
 .avatar {
-    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
     display: flex; align-items: center; justify-content: center;
-    font-size: 0.75rem; font-weight: 700;
+    font-size: 0.7rem; font-weight: 700;
 }
 .avatar-bot { background: #0F766E; color: #FFFFFF; }
 .avatar-user { background: #FDE68A; color: #78350F; }
 .bubble {
-    padding: 11px 15px; line-height: 1.55; font-size: 0.97rem;
-    max-width: 78%; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    padding: 8px 12px; line-height: 1.45; font-size: 0.95rem;
+    max-width: 78%; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
 .bubble-user {
     background: #FFFFFF; color: #134E4A;
-    border: 1px solid #99F6E4; border-left: 4px solid #F59E0B;
-    border-radius: 16px 16px 4px 16px;
+    border: 1px solid #99F6E4; border-left: 3px solid #F59E0B;
+    border-radius: 14px 14px 4px 14px;
 }
 .bubble-bot {
     background: #0F766E; color: #F0FDFA;
-    border-radius: 16px 16px 16px 4px;
+    border-radius: 14px 14px 14px 4px;
 }
 
 /* Controls */
-.stRadio > div { gap: 8px; }
-.stRadio label p { font-weight: 600; color: #134E4A; }
-div[data-testid="stPopover"] button { border-radius: 12px; }
+.stRadio > div { gap: 6px; }
+.stRadio label p { font-weight: 600; color: #134E4A; font-size: 0.88rem; }
 .stButton > button {
     background: #F59E0B; color: #1C1917; border: none; font-weight: 700;
-    border-radius: 12px;
+    border-radius: 10px; padding: 0.25rem 0.6rem;
 }
 .stButton > button:hover { background: #D97706; color: #FFFFFF; }
-.stTextInput input { border-radius: 12px; }
-.attach-note { color: #0F766E; font-size: 0.85rem; font-weight: 600; margin: 0 0 4px 0; }
+.stTextInput input { border-radius: 10px; padding: 0.4rem 0.6rem; }
+div[data-testid="stPopover"] button { border-radius: 10px; padding: 0.25rem 0.5rem; }
+.attach-note { color: #0F766E; font-size: 0.82rem; font-weight: 600; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -90,10 +93,6 @@ st.markdown("""
     <span class="brand-badge">Tutor</span>
 </div>
 """, unsafe_allow_html=True)
-
-logo = Path(__file__).parent / "logo.jpg"
-if logo.exists():
-    st.image(str(logo), width=56)
 
 # ---------- Sound and voice helpers ----------
 def pcm_to_wav(pcm, rate=24000):
