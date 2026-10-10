@@ -10,46 +10,90 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
-MODEL = "gemini-flash-lite-latest"          # chat model
+MODEL = "gemini-flash-latest"          # chat model
 TRANSCRIBE_MODEL = "gemini-flash-latest"    # speech to text
 TTS_MODEL = "gemini-2.5-flash-preview-tts"  # text to speech (voice replies)
 VOICE_NAME = "Kore"
 FREE_QUESTIONS = 3
-CHAT_HEIGHT = 460
+CHAT_HEIGHT = 480
+REPLY_MODES = ["Text", "Voice", "Both"]
+ATTACH_TYPES = ["png", "jpg", "jpeg", "webp", "pdf"]
 
 st.set_page_config(page_title="Study Buddy AI", page_icon="📚", layout="centered")
 
 st.markdown("""
 <style>
-#MainMenu, footer { visibility: hidden; }
-.block-container { max-width: 760px; padding-top: 2rem; }
-.app-title { font-size: 2rem; font-weight: 700; color: #3F3D8F; margin: 0; }
-.app-sub { color: #6B7280; margin: 2px 0 12px 0; }
-.row-user { display: flex; justify-content: flex-end; margin: 8px 0; }
-.row-bot { display: flex; justify-content: flex-start; margin: 8px 0; }
+#MainMenu, footer, header[data-testid="stHeader"] { visibility: hidden; }
+.stApp { background: #F4FAF9; }
+.block-container { max-width: 780px; padding-top: 1.5rem; }
+
+/* Header card */
+.brand {
+    display: flex; align-items: center; gap: 14px;
+    background: linear-gradient(135deg, #0F766E 0%, #115E59 100%);
+    border-radius: 18px; padding: 16px 20px; margin-bottom: 14px;
+    box-shadow: 0 6px 18px rgba(15, 118, 110, 0.18);
+}
+.brand-title { color: #FFFFFF; font-size: 1.5rem; font-weight: 700; margin: 0; letter-spacing: 0.2px; }
+.brand-sub { color: #CCFBF1; font-size: 0.92rem; margin: 2px 0 0 0; }
+.brand-badge {
+    margin-left: auto; background: #FDE68A; color: #78350F;
+    font-size: 0.72rem; font-weight: 700; padding: 4px 10px; border-radius: 999px;
+}
+
+/* Chat rows with avatars */
+.row { display: flex; align-items: flex-end; gap: 10px; margin: 10px 0; }
+.row-user { justify-content: flex-end; }
+.row-bot { justify-content: flex-start; }
+.avatar {
+    width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; font-weight: 700;
+}
+.avatar-bot { background: #0F766E; color: #FFFFFF; }
+.avatar-user { background: #FDE68A; color: #78350F; }
+.bubble {
+    padding: 11px 15px; line-height: 1.55; font-size: 0.97rem;
+    max-width: 78%; box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+}
 .bubble-user {
-    background: #6C63FF; color: #FFFFFF; padding: 10px 14px;
-    border-radius: 16px 16px 4px 16px; max-width: 75%; line-height: 1.5;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+    background: #FFFFFF; color: #134E4A;
+    border: 1px solid #99F6E4; border-left: 4px solid #F59E0B;
+    border-radius: 16px 16px 4px 16px;
 }
 .bubble-bot {
-    background: #FFFFFF; color: #1F2937; border: 1px solid #E5E7EB;
-    padding: 10px 14px; border-radius: 16px 16px 16px 4px; max-width: 80%;
-    line-height: 1.5; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    background: #0F766E; color: #F0FDFA;
+    border-radius: 16px 16px 16px 4px;
 }
+
+/* Controls */
+.stRadio > div { gap: 8px; }
+.stRadio label p { font-weight: 600; color: #134E4A; }
+div[data-testid="stPopover"] button { border-radius: 12px; }
+.stButton > button {
+    background: #F59E0B; color: #1C1917; border: none; font-weight: 700;
+    border-radius: 12px;
+}
+.stButton > button:hover { background: #D97706; color: #FFFFFF; }
+.stTextInput input { border-radius: 12px; }
+.attach-note { color: #0F766E; font-size: 0.85rem; font-weight: 600; margin: 0 0 4px 0; }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Header ----------
-col1, col2 = st.columns([1, 5], vertical_alignment="center")
-with col1:
-    logo = Path(__file__).parent / "logo.jpg"
-    if logo.exists():
-        st.image(str(logo), width=64)
-with col2:
-    st.markdown('<div class="app-title">Study Buddy AI</div>', unsafe_allow_html=True)
-st.markdown('<div class="app-sub">Ask me anything about your studies. Type or speak.</div>',
-            unsafe_allow_html=True)
+st.markdown("""
+<div class="brand">
+    <div>
+        <p class="brand-title">📚 Study Buddy AI</p>
+        <p class="brand-sub">Learn step by step. Ask by text, voice, or file.</p>
+    </div>
+    <span class="brand-badge">Tutor</span>
+</div>
+""", unsafe_allow_html=True)
+
+logo = Path(__file__).parent / "logo.jpg"
+if logo.exists():
+    st.image(str(logo), width=56)
 
 # ---------- Sound and voice helpers ----------
 def pcm_to_wav(pcm, rate=24000):
@@ -102,7 +146,7 @@ if "chat" not in st.session_state:
     st.session_state.chat = client.chats.create(
         model=MODEL,
         config=types.GenerateContentConfig(
-            system_instruction="You are a patient exam and homework tutor for students. When a student asks about a topic, explain it simply in small steps with one clear example. Then give one practice question and wait for their answer. If they are wrong, hint first and explain the mistake kindly. If they ask for a quiz, give 5 questions, one at a time. If they paste a homework question, guide them to the answer rather than just stating it. Keep replies short and encouraging."
+            system_instruction="You are a patient exam and homework tutor for students. When a student asks about a topic, explain it simply in small steps with one clear example. Then give one practice question and wait for their answer. If they are wrong, hint first and explain the mistake kindly. If they ask for a quiz, give 5 questions, one at a time. If they paste a homework question, guide them to the answer rather than just stating it. If they attach an image or PDF, read it carefully and guide them through it. Keep replies short and encouraging."
         ),
     )
 st.session_state.setdefault("messages", [])
@@ -112,11 +156,17 @@ st.session_state.setdefault("unlocked", False)
 st.session_state.setdefault("pending_voice", None)
 st.session_state.setdefault("to_send", "")
 st.session_state.setdefault("draft", "")
+st.session_state.setdefault("reply_mode", "Text")
+st.session_state.setdefault("att_n", 0)
+
+def current_attachment():
+    return st.session_state.get(f"att_{st.session_state.att_n}")
 
 def submit_draft():
     text = st.session_state.get("draft", "").strip()
-    if text:
-        st.session_state.to_send = text
+    att = current_attachment()
+    if text or att is not None:
+        st.session_state.to_send = text or "Please help me with this file."
     st.session_state.draft = ""
 
 def speak(text):
@@ -138,14 +188,20 @@ def speak(text):
     except Exception:
         return None
 
-def ask(text_in, label):
+def ask(text_in, label, attachment=None):
     st.session_state.used += 1
     st.session_state.messages.append({"role": "user", "text": label})
+
+    content = text_in
+    if attachment is not None:
+        part = types.Part.from_bytes(data=attachment.getvalue(), mime_type=attachment.type)
+        content = [part, text_in]
+
     text = ""
     for attempt in range(2):
         try:
             with st.spinner("Thinking..."):
-                reply = st.session_state.chat.send_message(text_in)
+                reply = st.session_state.chat.send_message(content)
             text = (reply.text or "").strip()
         except Exception:
             text = ""
@@ -153,7 +209,7 @@ def ask(text_in, label):
             break
     if not text:
         text = "I couldn't get an answer just now. Please try again or rephrase your question."
-    else:
+    elif st.session_state.reply_mode in ("Voice", "Both"):
         with st.spinner("Preparing voice..."):
             st.session_state.pending_voice = speak(text)
     st.session_state.messages.append({"role": "assistant", "text": text})
@@ -171,18 +227,36 @@ def transcribe(data):
 
 locked = (not st.session_state.unlocked) and st.session_state.used >= FREE_QUESTIONS
 
+# ---------- Reply mode choice ----------
+if not locked:
+    st.radio("How should I answer?", REPLY_MODES, key="reply_mode", horizontal=True)
+
 # ---------- Chat history (fixed-height box) ----------
 chat_box = st.container(height=CHAT_HEIGHT, border=False)
+
+# ---------- Attachment indicator ----------
+if not locked and current_attachment() is not None:
+    st.markdown(
+        f'<p class="attach-note">📎 {html.escape(current_attachment().name)} attached</p>',
+        unsafe_allow_html=True,
+    )
 
 # ---------- Input row (only when unlocked) ----------
 audio = None
 if not locked:
-    c_text, c_mic, c_send = st.columns([12, 2, 2], vertical_alignment="bottom")
+    c_plus, c_text, c_mic, c_send = st.columns([1, 11, 2, 2], vertical_alignment="bottom")
+    with c_plus:
+        with st.popover("+"):
+            st.file_uploader(
+                "Add a picture or PDF",
+                type=ATTACH_TYPES,
+                key=f"att_{st.session_state.att_n}",
+            )
     with c_text:
         st.text_input(
             "Message",
             key="draft",
-            placeholder="Type your message...",
+            placeholder="Ask a study question...",
             label_visibility="collapsed",
             on_change=submit_draft,
         )
@@ -197,8 +271,11 @@ st.session_state.to_send = ""
 
 if not locked:
     if prompt:
+        att = current_attachment()
         st.audio(SEND_SOUND, format="audio/wav", autoplay=True)
-        ask(prompt, prompt)
+        label = prompt if att is None else f"📎 {att.name}\n{prompt}"
+        ask(prompt, label, attachment=att)
+        st.session_state.att_n += 1
         st.rerun()
     elif audio is not None:
         data = audio.getvalue()
@@ -214,18 +291,22 @@ if not locked:
             else:
                 st.warning("I couldn't hear that clearly. Please record again.")
 
-# ---------- Render history inside the box ----------
+# ---------- Render history with avatars ----------
 with chat_box:
     for m in st.session_state.messages:
         safe = html.escape(m["text"]).replace("\n", "<br>")
         if m["role"] == "user":
             st.markdown(
-                f'<div class="row-user"><div class="bubble-user">{safe}</div></div>',
+                f'<div class="row row-user">'
+                f'<div class="bubble bubble-user">{safe}</div>'
+                f'<div class="avatar avatar-user">You</div></div>',
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                f'<div class="row-bot"><div class="bubble-bot">{safe}</div></div>',
+                f'<div class="row row-bot">'
+                f'<div class="avatar avatar-bot">SB</div>'
+                f'<div class="bubble bubble-bot">{safe}</div></div>',
                 unsafe_allow_html=True,
             )
     if st.session_state.get("pending_voice"):
