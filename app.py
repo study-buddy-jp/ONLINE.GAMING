@@ -1,4 +1,5 @@
 import os
+import html
 import hashlib
 import streamlit as st
 from google import genai
@@ -12,12 +13,24 @@ st.set_page_config(page_title="Study Buddy AI", page_icon="📚")
 
 st.markdown("""
 <style>
-[data-testid="stChatMessage"] {
-    border-radius: 16px;
-    padding: 12px 16px;
-    margin-bottom: 8px;
-    background-color: #FFFFFF;
+.row-user { display: flex; justify-content: flex-end; margin: 10px 0; }
+.row-bot  { display: flex; justify-content: flex-start; margin: 10px 0; }
+.bubble-user {
+    background: #6C63FF;
+    color: #FFFFFF;
+    padding: 10px 14px;
+    border-radius: 16px 16px 4px 16px;
+    max-width: 75%;
+    line-height: 1.5;
+}
+.bubble-bot {
+    background: #FFFFFF;
+    color: #222222;
     border: 1px solid #D5DCFF;
+    padding: 10px 14px;
+    border-radius: 16px 16px 16px 4px;
+    max-width: 80%;
+    line-height: 1.5;
 }
 h1 { color: #6C63FF; text-align: center; }
 </style>
@@ -89,12 +102,11 @@ def transcribe(data):
     except Exception:
         return ""
 
-chat_area = st.container()
-
 locked = (not st.session_state.unlocked) and st.session_state.used >= FREE_QUESTIONS
 prompt = None
 audio = None
 
+# Fixed top area: access code box or mic (never moves)
 if locked:
     st.info("You've used your free questions. Get an access code to keep learning.")
     if PAY_LINK:
@@ -107,8 +119,8 @@ if locked:
         else:
             st.error("That code is not valid. Check it and try again.")
 else:
-    with st.expander("🎤 Speak instead", expanded=True):
-        audio = st.audio_input("Press the mic, speak, then press stop")
+    st.markdown("**🎤 Speak instead**")
+    audio = st.audio_input("Press the mic, speak, then press stop")
     prompt = st.chat_input("Type your message")
 
 if prompt:
@@ -127,7 +139,18 @@ elif audio is not None:
         else:
             st.warning("I couldn't hear that clearly. Please record again.")
 
+# Chat history below the fixed area
+chat_area = st.container()
 with chat_area:
     for m in st.session_state.messages:
-        with st.chat_message(m["role"]):
-            st.write(m["text"])
+        safe = html.escape(m["text"]).replace("\n", "<br>")
+        if m["role"] == "user":
+            st.markdown(
+                f'<div class="row-user"><div class="bubble-user">{safe}</div></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                f'<div class="row-bot"><div class="bubble-bot">{safe}</div></div>',
+                unsafe_allow_html=True,
+            )
