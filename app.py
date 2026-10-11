@@ -31,6 +31,7 @@ DB_PATH = Path(__file__).parent / "matchday.db"
 HISTORY_LIMIT = 20
 PACK_SIZE = 5   # prediction credits per access code
 MIN_AGE = 18
+NEW_CHAT_TITLE = "New chat"
 EAT = timezone(timedelta(hours=3))  # Nairobi time
 
 LEAGUES = {
@@ -51,11 +52,17 @@ QUICK_ACTIONS = [
     ("🔮 Predict a match", "Predict the next match of the top team in the table."),
 ]
 
-# Backup keyword check, used only if the classifier call fails
+# Words that mean the user wants a prediction (costs one credit)
 PAID_KEYWORDS = [
     "predict", "prediction", "probab", "estimate", "chance", "odds",
     "forecast", "who will win", "who wins", "likely", "win probability", "%",
     "stronger", "better", "beat", "win",
+]
+
+# Words that mean a general question (free)
+GENERAL_KEYWORDS = [
+    "table", "fixture", "fixtures", "form", "schedule", "explain",
+    "history", "head to head", "standings",
 ]
 
 TERMS = """
@@ -64,7 +71,7 @@ TERMS = """
 1. **What the app is:** An information and analysis tool for football fans. It shows fixtures and tables and gives estimated probabilities for discussion.
 2. **Not betting advice:** Estimates are not guarantees and are not betting tips. We do not advise on bets.
 3. **Age:** You must be 18 or older. You will be asked to confirm your age. This is based on your own answer.
-4. **Your information:** To save your conversations, we store your email address, a scrambled form of your passcode, and the messages you send and receive. You can delete your history at any time from the sidebar. Do not send personal or sensitive information in your messages.
+4. **Your information:** To save your conversations, we store your email address, a scrambled form of your passcode, and the messages you send and receive. You can delete your chats at any time from the sidebar. Do not send personal or sensitive information in your messages.
 5. **Prediction credits:** Predictions use credits. Credits are bought with an access code after payment is confirmed. Each code gives a fixed number of credits, can be used once, and is not refundable after it is redeemed. Codes are personal and must not be shared.
 6. **Accuracy:** Data comes from third-party sources and may be delayed or incomplete. We are not liable for decisions made from the app.
 7. **Changes:** We may update these terms. Continued use means you accept the current version.
@@ -125,7 +132,6 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
     padding: 8px 12px; margin: 5px 0; font-size: 0.88rem; color: #1E3A8A;
 }
 .fx-date { color: #64748B; font-size: 0.78rem; white-space: nowrap; }
-.empty { color: #64748B; text-align: center; font-size: 0.92rem; margin-top: 22%; line-height: 1.6; }
 
 .row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
@@ -169,6 +175,7 @@ st.session_state.setdefault("accepted_terms", False)
 st.session_state.setdefault("age_ok", False)
 st.session_state.setdefault("age_blocked", False)
 st.session_state.setdefault("user_email", None)
+st.session_state.setdefault("conv_id", None)
 st.session_state.setdefault("messages", [])
 st.session_state.setdefault("last_audio", None)
 st.session_state.setdefault("paywall", False)
@@ -230,8 +237,13 @@ def init_db():
         "(email TEXT PRIMARY KEY, salt TEXT, pass_hash TEXT, created TEXT)"
     )
     con.execute(
-        "CREATE TABLE IF NOT EXISTS messages "
-        "(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, role TEXT, text TEXT, created TEXT)"
+        "CREATE TABLE IF NOT EXISTS conversations "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, title TEXT, created TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS chat_messages "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, conv_id INTEGER, email TEXT, "
+        "role TEXT, text TEXT, created TEXT)"
     )
     con.execute(
         "CREATE TABLE IF NOT EXISTS wallet "
@@ -253,6 +265,15 @@ def db_exec(sql, args=()):
         rows = con.execute(sql, args).fetchall()
         con.commit()
         return rows
+    finally:
+        con.close()
+
+def db_insert_id(sql, args=()):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        cur = con.execute(sql, args)
+        con.commit()
+        return cur.lastrowid
     finally:
         con.close()
 
@@ -281,18 +302,61 @@ def sign_in(email, passcode):
     )
     return True, email
 
-def load_history(email):
-    rows = db_exec("SELECT role, text FROM messages WHERE email=? ORDER BY id", (email,))
+# ----- Conversations -----
+def create_conversation(email):
+    return db_insert_id(
+        "INSERT INTO conversations (email, title, created) VALUES (?,?,?)",
+        (email, NEW_CHAT_TITLE, datetime.now().isoformat()),
+    )
+
+def list_conversations(email):
+    return db_exec(
+        "SELECT id, title FROM conversations WHERE email=? ORDER BY id DESC LIMIT 30",
+        (email,),
+    )
+
+def load_conv_messages(conv_id):
+    rows = db_exec(
+        "SELECT role, text FROM chat_messages WHERE conv_id=? ORDER BY id",
+        (conv_id,),
+    )
     return [{"role": r, "text": t} for r, t in rows]
 
 def add_message(role, text):
     st.session_state.messages.append({"role": role, "text": text})
-    if st.session_state.user_email:
+    email = st.session_state.user_email
+    conv_id = st.session_state.conv_id
+    if email and conv_id:
         db_exec(
-            "INSERT INTO messages (email, role, text, created) VALUES (?,?,?,?)",
-            (st.session_state.user_email, role, text, datetime.now().isoformat()),
+            "INSERT INTO chat_messages (conv_id, email, role, text, created) VALUES (?,?,?,?,?)",
+            (conv_id, email, role, text, datetime.now().isoformat()),
         )
+        if role == "user":
+            # Name the chat after its first question
+            db_exec(
+                "UPDATE conversations SET title=? WHERE id=? AND title=?",
+                (text[:40], conv_id, NEW_CHAT_TITLE),
+            )
 
+def start_new_chat():
+    st.session_state.conv_id = create_conversation(st.session_state.user_email)
+    st.session_state.messages = []
+    st.session_state.paywall = False
+    st.session_state.pop("chat", None)
+
+def open_chat(conv_id):
+    st.session_state.conv_id = conv_id
+    st.session_state.messages = load_conv_messages(conv_id)
+    st.session_state.paywall = False
+    st.session_state.pop("chat", None)
+
+def delete_all_chats():
+    email = st.session_state.user_email
+    db_exec("DELETE FROM chat_messages WHERE email=?", (email,))
+    db_exec("DELETE FROM conversations WHERE email=?", (email,))
+    start_new_chat()
+
+# ----- Credits -----
 def get_credits(email):
     rows = db_exec("SELECT credits FROM wallet WHERE email=?", (email,))
     return rows[0][0] if rows else 0
@@ -332,27 +396,46 @@ if not st.session_state.user_email:
         ok, result = sign_in(email_in, pass_in)
         if ok:
             st.session_state.user_email = result
-            st.session_state.messages = load_history(result)
+            # Every sign-in starts a fresh chat; older chats stay in the sidebar
+            st.session_state.conv_id = create_conversation(result)
+            st.session_state.messages = []
+            st.session_state.paywall = False
+            st.session_state.pop("chat", None)
             st.rerun()
         else:
             st.error(result)
     st.stop()
 
-# ---------- Sidebar: account and credits ----------
+# ---------- Sidebar: account, chats, credits ----------
 st.sidebar.markdown(f"**Signed in as**  \n{st.session_state.user_email}")
 st.sidebar.markdown(f"**Prediction credits:** {get_credits(st.session_state.user_email)}")
+
+st.sidebar.button("➕ New chat", on_click=start_new_chat, use_container_width=True)
+
+st.sidebar.markdown("**Previous chats**")
+for conv_id, title in list_conversations(st.session_state.user_email):
+    marker = "▶ " if conv_id == st.session_state.conv_id else ""
+    st.sidebar.button(
+        f"{marker}{title}",
+        key=f"conv_{conv_id}",
+        on_click=open_chat,
+        args=(conv_id,),
+        use_container_width=True,
+    )
+
+if st.sidebar.button("🗑️ Delete all my chats"):
+    delete_all_chats()
+    st.rerun()
+
 if st.sidebar.button("Sign out"):
     st.session_state.user_email = None
+    st.session_state.conv_id = None
     st.session_state.messages = []
     st.session_state.paywall = False
     st.session_state.pop("chat", None)
     st.rerun()
-if st.sidebar.button("Delete my history"):
-    db_exec("DELETE FROM messages WHERE email=?", (st.session_state.user_email,))
-    st.session_state.messages = []
-    st.session_state.pop("chat", None)
-    st.rerun()
-st.sidebar.caption("Credits stay on your account. Deleting history does not remove them.")
+
+st.sidebar.caption("Credits stay on your account when you delete chats.")
 
 st.markdown('<p class="disclaimer">Probabilities are estimates for discussion, not guarantees or betting advice.</p>',
             unsafe_allow_html=True)
@@ -516,24 +599,15 @@ def submit_draft():
 def pick_quick(question):
     st.session_state.to_send = question
 
-def is_paid_request(text):
-    t = text.lower()
-    return any(word in t for word in PAID_KEYWORDS)
-
 def needs_credit(text_in):
-    """Ask the model to classify the question. Falls back to keywords if that fails."""
-    prompt = (
-        "Classify the user's message as PREDICTION or GENERAL. "
-        "PREDICTION means they want a winner, odds, chances, probabilities, a score "
-        "forecast, or any estimate about a match that hasn't been played. "
-        "GENERAL means fixtures, tables, form, history, or explanations. "
-        "Reply with one word only.\n\nMessage: " + text_in
-    )
-    try:
-        r = client.models.generate_content(model=MODEL, contents=prompt)
-        return "PREDICTION" in (r.text or "").upper()
-    except Exception:
-        return is_paid_request(text_in)
+    """Decide with keywords only, so each question uses one model call at most.
+    The percentage check in ask() still catches predictions that slip through."""
+    t = text_in.lower()
+    if any(w in t for w in GENERAL_KEYWORDS):
+        return False
+    if any(w in t for w in PAID_KEYWORDS):
+        return True
+    return False
 
 def speak(text):
     try:
@@ -676,7 +750,7 @@ with c_mode:
 
 league_code = LEAGUES[st.session_state.league]
 
-# ---------- Start screen (before the first message) or chat box (after) ----------
+# ---------- Start screen (empty chat) or chat box (has messages) ----------
 if st.session_state.messages:
     chat_box = st.container(height=CHAT_HEIGHT, border=False)
 else:
