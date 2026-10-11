@@ -162,9 +162,6 @@ CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
 PAY_LINK = get_secret("PAY_LINK")
 FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
 
-# Temporary status check: shows in the sidebar whether the football key loaded.
-st.sidebar.write("Football key loaded:", bool(FOOTBALL_KEY))
-
 @st.cache_resource
 def get_client():
     return genai.Client(api_key=key)
@@ -175,7 +172,7 @@ client = get_client()
 @st.cache_data(ttl=900)
 def epl_upcoming(_key):
     if not _key:
-        return None
+        return None, "No football key found in secrets."
     try:
         r = requests.get(
             "https://api.football-data.org/v4/competitions/PL/matches",
@@ -183,31 +180,40 @@ def epl_upcoming(_key):
             params={"status": "SCHEDULED"},
             timeout=10,
         )
-        r.raise_for_status()
-        return r.json().get("matches", [])
-    except Exception:
-        return None
+        if r.status_code != 200:
+            return None, f"Football API returned status {r.status_code}: {r.text[:200]}"
+        return r.json().get("matches", []), None
+    except Exception as e:
+        return None, f"Request failed: {e}"
 
 @st.cache_data(ttl=3600)
 def epl_table(_key):
     if not _key:
-        return None
+        return None, "No football key found in secrets."
     try:
         r = requests.get(
             "https://api.football-data.org/v4/competitions/PL/standings",
             headers={"X-Auth-Token": _key},
             timeout=10,
         )
-        r.raise_for_status()
+        if r.status_code != 200:
+            return None, f"Football API returned status {r.status_code}: {r.text[:200]}"
         standings = r.json().get("standings", [])
-        return standings[0].get("table", []) if standings else None
-    except Exception:
-        return None
+        table = standings[0].get("table", []) if standings else None
+        return table, None
+    except Exception as e:
+        return None, f"Request failed: {e}"
+
+# Temporary diagnostic: shows the real football API result in the sidebar.
+# Remove this block once fixtures load.
+_, _fx_err = epl_upcoming(FOOTBALL_KEY)
+st.sidebar.write("Football key loaded:", bool(FOOTBALL_KEY))
+st.sidebar.write("Fixtures status:", _fx_err or "OK")
 
 def fixtures_context(limit=10):
-    matches = epl_upcoming(FOOTBALL_KEY)
+    matches, err = epl_upcoming(FOOTBALL_KEY)
     if not matches:
-        return "Live fixture data is unavailable right now."
+        return f"Live fixture data is unavailable right now. ({err or 'no matches returned'})"
     lines = []
     for m in matches[:limit]:
         date = m["utcDate"][:16].replace("T", " ")
@@ -215,9 +221,9 @@ def fixtures_context(limit=10):
     return "Upcoming Premier League fixtures:\n" + "\n".join(lines)
 
 def table_context(limit=20):
-    table = epl_table(FOOTBALL_KEY)
+    table, err = epl_table(FOOTBALL_KEY)
     if not table:
-        return "League table is unavailable right now."
+        return f"League table is unavailable right now. ({err or 'no table returned'})"
     lines = []
     for row in table[:limit]:
         lines.append(
