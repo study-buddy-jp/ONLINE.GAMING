@@ -39,6 +39,16 @@ LEAGUES = {
     "Champions League": "CL",
 }
 
+# Quick actions shown before the first message (label, question sent to the bot)
+QUICK_ACTIONS = [
+    ("📅 Upcoming fixtures", "What are the upcoming fixtures in this league?"),
+    ("🏆 League table", "Show me the current table and who is in the top 4."),
+    ("🔥 Best form", "Which teams have the best form right now?"),
+    ("📊 Explain a stat", "Explain what goals for and goals against tell me about a team."),
+    ("🆚 Compare two teams", "Compare the two strongest teams in this league."),
+    ("🔮 Predict a match", "Predict the next match of the top team in the table."),
+]
+
 PAID_KEYWORDS = [
     "predict", "prediction", "probab", "estimate", "chance", "odds",
     "forecast", "who will win", "who wins", "likely to win", "win probability", "%",
@@ -61,7 +71,7 @@ st.set_page_config(page_title="Matchday Pulse", page_icon="⚽", layout="centere
 st.markdown("""
 <style>
 #MainMenu, footer, header[data-testid="stHeader"] { visibility: hidden; }
-.stApp { background: #F5F8F4; }
+.stApp { background: #EFF6FF; }
 .block-container { max-width: 780px; padding-top: 1rem; padding-bottom: 0.5rem; }
 div[data-testid="stVerticalBlock"] { gap: 0.5rem; }
 div[data-testid="stMarkdownContainer"] p { margin-bottom: 0; }
@@ -79,19 +89,19 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 
 .brand {
     display: flex; align-items: center; gap: 14px;
-    background: linear-gradient(135deg, #14532D 0%, #166534 100%);
+    background: linear-gradient(135deg, #1E40AF 0%, #1D4ED8 100%);
     border-radius: 16px; padding: 12px 18px; margin-bottom: 6px;
-    box-shadow: 0 4px 14px rgba(20, 83, 45, 0.20);
+    box-shadow: 0 4px 14px rgba(29, 78, 216, 0.20);
 }
 .brand-title { color: #FFFFFF; font-size: 1.3rem; font-weight: 700; margin: 0; }
-.brand-sub { color: #DCFCE7; font-size: 0.88rem; margin: 2px 0 0 0; }
+.brand-sub { color: #DBEAFE; font-size: 0.88rem; margin: 2px 0 0 0; }
 .brand-badge {
     margin-left: auto; background: #FACC15; color: #422006;
     font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px;
     white-space: nowrap;
 }
-.disclaimer { color: #6B7280; font-size: 0.78rem; margin: 2px 0 4px 0; }
-.empty { color: #6B7280; text-align: center; font-size: 0.92rem; margin-top: 22%; line-height: 1.6; }
+.disclaimer { color: #64748B; font-size: 0.78rem; margin: 2px 0 4px 0; }
+.quick-title { color: #1E3A8A; font-weight: 700; font-size: 0.95rem; margin: 6px 0 4px 0; }
 
 .row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
@@ -101,32 +111,32 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
     display: flex; align-items: center; justify-content: center;
     font-size: 0.7rem; font-weight: 700;
 }
-.avatar-bot { background: #166534; color: #FFFFFF; }
+.avatar-bot { background: #1D4ED8; color: #FFFFFF; }
 .avatar-user { background: #FACC15; color: #422006; }
 .bubble {
     padding: 8px 12px; line-height: 1.45; font-size: 0.95rem;
     max-width: 78%; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
 }
 .bubble-user {
-    background: #FFFFFF; color: #14532D;
-    border: 1px solid #BBF7D0; border-left: 3px solid #FACC15;
+    background: #FFFFFF; color: #1E3A8A;
+    border: 1px solid #BFDBFE; border-left: 3px solid #FACC15;
     border-radius: 14px 14px 4px 14px;
 }
 .bubble-bot {
-    background: #166534; color: #F0FDF4;
+    background: #1D4ED8; color: #EFF6FF;
     border-radius: 14px 14px 14px 4px;
 }
 
 .stRadio > div { gap: 6px; }
-.stRadio label p { font-weight: 600; color: #14532D; font-size: 0.88rem; }
+.stRadio label p { font-weight: 600; color: #1E3A8A; font-size: 0.88rem; }
 .stButton > button {
-    background: #FACC15; color: #422006; border: none; font-weight: 700;
+    background: #FFFFFF; color: #1E3A8A; border: 1px solid #93C5FD; font-weight: 600;
     border-radius: 10px; padding: 0.25rem 0.6rem;
 }
-.stButton > button:hover { background: #EAB308; color: #FFFFFF; }
+.stButton > button:hover { background: #DBEAFE; color: #1E3A8A; border-color: #3B82F6; }
 .stTextInput input { border-radius: 10px; padding: 0.4rem 0.6rem; }
 div[data-testid="stPopover"] button { border-radius: 10px; padding: 0.25rem 0.5rem; }
-.attach-note { color: #166534; font-size: 0.82rem; font-weight: 600; margin: 0; }
+.attach-note { color: #1D4ED8; font-size: 0.82rem; font-weight: 600; margin: 0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -474,6 +484,9 @@ def submit_draft():
         st.session_state.to_send = text or "Please analyse this file."
     st.session_state.draft = ""
 
+def pick_quick(question):
+    st.session_state.to_send = question
+
 def is_paid_request(text):
     t = text.lower()
     return any(word in t for word in PAID_KEYWORDS)
@@ -563,8 +576,25 @@ with c_mode:
 
 league_code = LEAGUES[st.session_state.league]
 
-# ---------- Chat history (fixed-height box) ----------
-chat_box = st.container(height=CHAT_HEIGHT, border=False)
+# ---------- Quick actions (only before the first message, so no blank space) ----------
+if not st.session_state.messages:
+    st.markdown('<p class="quick-title">What would you like to know?</p>', unsafe_allow_html=True)
+    for i in range(0, len(QUICK_ACTIONS), 2):
+        cols = st.columns(2)
+        for j, col in enumerate(cols):
+            if i + j < len(QUICK_ACTIONS):
+                label, question = QUICK_ACTIONS[i + j]
+                with col:
+                    st.button(
+                        label,
+                        key=f"qa_{i + j}",
+                        on_click=pick_quick,
+                        args=(question,),
+                        use_container_width=True,
+                    )
+else:
+    # ---------- Chat history (fixed-height box, only once there are messages) ----------
+    chat_box = st.container(height=CHAT_HEIGHT, border=False)
 
 if current_attachment() is not None:
     st.markdown(
@@ -620,32 +650,27 @@ elif audio is not None:
             st.warning("I couldn't hear that clearly. Please record again.")
 
 # ---------- Render history ----------
-with chat_box:
-    if not st.session_state.messages:
-        st.markdown(
-            '<div class="empty">Pick a league, then ask about its fixtures, a team\'s form,<br>'
-            'or upload a table screenshot to get started.</div>',
-            unsafe_allow_html=True,
-        )
-    for m in st.session_state.messages:
-        safe = html.escape(m["text"]).replace("\n", "<br>")
-        if m["role"] == "user":
-            st.markdown(
-                f'<div class="row row-user">'
-                f'<div class="bubble bubble-user">{safe}</div>'
-                f'<div class="avatar avatar-user">You</div></div>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                f'<div class="row row-bot">'
-                f'<div class="avatar avatar-bot">MP</div>'
-                f'<div class="bubble bubble-bot">{safe}</div></div>',
-                unsafe_allow_html=True,
-            )
-    if st.session_state.get("pending_voice"):
-        st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
-        st.session_state.pending_voice = None
+if st.session_state.messages:
+    with chat_box:
+        for m in st.session_state.messages:
+            safe = html.escape(m["text"]).replace("\n", "<br>")
+            if m["role"] == "user":
+                st.markdown(
+                    f'<div class="row row-user">'
+                    f'<div class="bubble bubble-user">{safe}</div>'
+                    f'<div class="avatar avatar-user">You</div></div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f'<div class="row row-bot">'
+                    f'<div class="avatar avatar-bot">MP</div>'
+                    f'<div class="bubble bubble-bot">{safe}</div></div>',
+                    unsafe_allow_html=True,
+                )
+        if st.session_state.get("pending_voice"):
+            st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
+            st.session_state.pending_voice = None
 
 # ---------- Buy or redeem credits (only when needed) ----------
 if st.session_state.paywall:
