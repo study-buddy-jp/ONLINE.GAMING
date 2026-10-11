@@ -160,7 +160,10 @@ if not key:
 
 CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
 PAY_LINK = get_secret("PAY_LINK")
-FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY")
+FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
+
+# Temporary status check: shows in the sidebar whether the football key loaded.
+st.sidebar.write("Football key loaded:", bool(FOOTBALL_KEY))
 
 @st.cache_resource
 def get_client():
@@ -170,13 +173,13 @@ client = get_client()
 
 # ---------- Football data (cached to respect rate limits) ----------
 @st.cache_data(ttl=900)
-def epl_upcoming():
-    if not FOOTBALL_KEY:
+def epl_upcoming(_key):
+    if not _key:
         return None
     try:
         r = requests.get(
             "https://api.football-data.org/v4/competitions/PL/matches",
-            headers={"X-Auth-Token": FOOTBALL_KEY},
+            headers={"X-Auth-Token": _key},
             params={"status": "SCHEDULED"},
             timeout=10,
         )
@@ -186,13 +189,13 @@ def epl_upcoming():
         return None
 
 @st.cache_data(ttl=3600)
-def epl_table():
-    if not FOOTBALL_KEY:
+def epl_table(_key):
+    if not _key:
         return None
     try:
         r = requests.get(
             "https://api.football-data.org/v4/competitions/PL/standings",
-            headers={"X-Auth-Token": FOOTBALL_KEY},
+            headers={"X-Auth-Token": _key},
             timeout=10,
         )
         r.raise_for_status()
@@ -202,7 +205,7 @@ def epl_table():
         return None
 
 def fixtures_context(limit=10):
-    matches = epl_upcoming()
+    matches = epl_upcoming(FOOTBALL_KEY)
     if not matches:
         return "Live fixture data is unavailable right now."
     lines = []
@@ -212,7 +215,7 @@ def fixtures_context(limit=10):
     return "Upcoming Premier League fixtures:\n" + "\n".join(lines)
 
 def table_context(limit=20):
-    table = epl_table()
+    table = epl_table(FOOTBALL_KEY)
     if not table:
         return "League table is unavailable right now."
     lines = []
