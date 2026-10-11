@@ -22,7 +22,8 @@ VOICE_NAME = "Kore"
 CHAT_HEIGHT = 340
 REPLY_MODES = ["Text", "Voice", "Both"]
 ATTACH_TYPES = ["png", "jpg", "jpeg", "webp", "pdf"]
-APP_TITLE = "⚽ Matchday Pulse"
+APP_NAME = "Matchday Prediction"
+APP_TITLE = f"⚽ {APP_NAME}"
 APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
 APP_ROLE_TAG = "Match Analyst"
 DB_PATH = Path(__file__).parent / "matchday.db"
@@ -39,7 +40,6 @@ LEAGUES = {
     "Champions League": "CL",
 }
 
-# Quick actions shown before the first message (label, question sent to the bot)
 QUICK_ACTIONS = [
     ("📅 Upcoming fixtures", "What are the upcoming fixtures in this league?"),
     ("🏆 League table", "Show me the current table and who is in the top 4."),
@@ -55,7 +55,7 @@ PAID_KEYWORDS = [
 ]
 
 TERMS = """
-**Welcome to Matchday Pulse.** Before you start, please read and accept these terms.
+**Welcome to Matchday Prediction.** Before you start, please read and accept these terms.
 
 1. **What the app is:** An information and analysis tool for football fans. It shows fixtures and tables and gives estimated probabilities for discussion.
 2. **Not betting advice:** Estimates are not guarantees and are not betting tips. We do not advise on bets.
@@ -66,7 +66,7 @@ TERMS = """
 7. **Changes:** We may update these terms. Continued use means you accept the current version.
 """
 
-st.set_page_config(page_title="Matchday Pulse", page_icon="⚽", layout="centered")
+st.set_page_config(page_title=APP_NAME, page_icon="⚽", layout="centered")
 
 st.markdown("""
 <style>
@@ -177,7 +177,7 @@ if not st.session_state.accepted_terms:
 
 # ---------- Step 2: age check ----------
 if st.session_state.age_blocked:
-    st.error(f"Sorry, you must be {MIN_AGE} or older to use Matchday Pulse, so you can't continue.")
+    st.error(f"Sorry, you must be {MIN_AGE} or older to use {APP_NAME}, so you can't continue.")
     st.stop()
 
 if not st.session_state.age_ok:
@@ -444,7 +444,7 @@ def match_context(code):
 
 # ---------- Chat setup ----------
 SYSTEM_PROMPT = (
-    "You are Matchday Pulse, a football match analyst for fans of top European leagues. "
+    "You are Matchday Prediction, a football match analyst for fans of top European leagues. "
     "Use only the fixture and table data provided in each message for facts such as "
     "results, positions, and upcoming matches. If the data is missing or does not cover "
     "something, say so instead of guessing. When asked about a match, cover: recent form, "
@@ -576,7 +576,7 @@ with c_mode:
 
 league_code = LEAGUES[st.session_state.league]
 
-# ---------- Quick actions (only before the first message, so no blank space) ----------
+# ---------- Quick actions (only before the first message) ----------
 if not st.session_state.messages:
     st.markdown('<p class="quick-title">What would you like to know?</p>', unsafe_allow_html=True)
     for i in range(0, len(QUICK_ACTIONS), 2):
@@ -593,7 +593,6 @@ if not st.session_state.messages:
                         use_container_width=True,
                     )
 else:
-    # ---------- Chat history (fixed-height box, only once there are messages) ----------
     chat_box = st.container(height=CHAT_HEIGHT, border=False)
 
 if current_attachment() is not None:
