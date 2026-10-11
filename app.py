@@ -4,7 +4,11 @@ import math
 import wave
 import struct
 import html
+import hmac
 import hashlib
+import secrets
+import sqlite3
+from datetime import datetime
 from pathlib import Path
 import requests
 import streamlit as st
@@ -19,14 +23,38 @@ CHAT_HEIGHT = 340
 REPLY_MODES = ["Text", "Voice", "Both"]
 ATTACH_TYPES = ["png", "jpg", "jpeg", "webp", "pdf"]
 APP_TITLE = "⚽ Matchday Pulse"
-APP_TAGLINE = "EPL fixtures, form, and match analysis. Ask by text, voice, or screenshot."
-APP_ROLE_TAG = "EPL Analyst"
+APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
+APP_ROLE_TAG = "Match Analyst"
+DB_PATH = Path(__file__).parent / "matchday.db"
+HISTORY_LIMIT = 20
+PACK_SIZE = 5   # prediction credits per access code
+MIN_AGE = 18
 
-# Words that signal a prediction or estimate (the paid part)
+LEAGUES = {
+    "Premier League (England)": "PL",
+    "Serie A (Italy)": "SA",
+    "La Liga (Spain)": "PD",
+    "Bundesliga (Germany)": "BL1",
+    "Ligue 1 (France)": "FL1",
+    "Champions League": "CL",
+}
+
 PAID_KEYWORDS = [
     "predict", "prediction", "probab", "estimate", "chance", "odds",
     "forecast", "who will win", "who wins", "likely to win", "win probability", "%",
 ]
+
+TERMS = """
+**Welcome to Matchday Pulse.** Before you start, please read and accept these terms.
+
+1. **What the app is:** An information and analysis tool for football fans. It shows fixtures and tables and gives estimated probabilities for discussion.
+2. **Not betting advice:** Estimates are not guarantees and are not betting tips. We do not advise on bets.
+3. **Age:** You must be 18 or older. You will be asked to confirm your age. This is based on your own answer.
+4. **Your information:** To save your conversations, we store your email address, a scrambled form of your passcode, and the messages you send and receive. You can delete your history at any time from the sidebar. Do not send personal or sensitive information in your messages.
+5. **Prediction credits:** Predictions use credits. Credits are bought with an access code after payment is confirmed. Each code gives a fixed number of credits, can be used once, and is not refundable after it is redeemed. Codes are personal and must not be shared.
+6. **Accuracy:** Data comes from third-party sources and may be delayed or incomplete. We are not liable for decisions made from the app.
+7. **Changes:** We may update these terms. Continued use means you accept the current version.
+"""
 
 st.set_page_config(page_title="Matchday Pulse", page_icon="⚽", layout="centered")
 
@@ -38,7 +66,6 @@ st.markdown("""
 div[data-testid="stVerticalBlock"] { gap: 0.5rem; }
 div[data-testid="stMarkdownContainer"] p { margin-bottom: 0; }
 
-/* Keep + / text / mic / send on ONE line, even on phones */
 div[data-testid="stHorizontalBlock"] {
     flex-wrap: nowrap !important;
     align-items: center !important;
@@ -50,7 +77,6 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
     min-height: 2.5rem; width: 100%;
 }
 
-/* Header card */
 .brand {
     display: flex; align-items: center; gap: 14px;
     background: linear-gradient(135deg, #14532D 0%, #166534 100%);
@@ -65,11 +91,8 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
     white-space: nowrap;
 }
 .disclaimer { color: #6B7280; font-size: 0.78rem; margin: 2px 0 4px 0; }
-
-/* Empty state */
 .empty { color: #6B7280; text-align: center; font-size: 0.92rem; margin-top: 22%; line-height: 1.6; }
 
-/* Chat rows */
 .row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
 .row-bot { justify-content: flex-start; }
@@ -94,7 +117,6 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
     border-radius: 14px 14px 14px 4px;
 }
 
-/* Controls */
 .stRadio > div { gap: 6px; }
 .stRadio label p { font-weight: 600; color: #14532D; font-size: 0.88rem; }
 .stButton > button {
@@ -108,6 +130,21 @@ div[data-testid="stPopover"] button { border-radius: 10px; padding: 0.25rem 0.5r
 </style>
 """, unsafe_allow_html=True)
 
+# ---------- Session state ----------
+st.session_state.setdefault("accepted_terms", False)
+st.session_state.setdefault("age_ok", False)
+st.session_state.setdefault("age_blocked", False)
+st.session_state.setdefault("user_email", None)
+st.session_state.setdefault("messages", [])
+st.session_state.setdefault("last_audio", None)
+st.session_state.setdefault("paywall", False)
+st.session_state.setdefault("pending_voice", None)
+st.session_state.setdefault("to_send", "")
+st.session_state.setdefault("draft", "")
+st.session_state.setdefault("reply_mode", "Text")
+st.session_state.setdefault("league", list(LEAGUES.keys())[0])
+st.session_state.setdefault("att_n", 0)
+
 # ---------- Header ----------
 st.markdown(f"""
 <div class="brand">
@@ -118,6 +155,171 @@ st.markdown(f"""
     <span class="brand-badge">{APP_ROLE_TAG}</span>
 </div>
 """, unsafe_allow_html=True)
+
+# ---------- Step 1: terms ----------
+if not st.session_state.accepted_terms:
+    st.markdown(TERMS)
+    agree = st.checkbox("I have read and accept the terms.")
+    if st.button("Continue", disabled=not agree):
+        st.session_state.accepted_terms = True
+        st.rerun()
+    st.stop()
+
+# ---------- Step 2: age check ----------
+if st.session_state.age_blocked:
+    st.error(f"Sorry, you must be {MIN_AGE} or older to use Matchday Pulse, so you can't continue.")
+    st.stop()
+
+if not st.session_state.age_ok:
+    st.markdown("### Confirm your age")
+    with st.form("age"):
+        age_txt = st.text_input("How old are you?", placeholder="e.g. 21")
+        age_submit = st.form_submit_button("Continue")
+    if age_submit:
+        age_clean = age_txt.strip()
+        if not age_clean.isdigit() or not (1 <= int(age_clean) <= 120):
+            st.error("Please enter your age as a number.")
+        elif int(age_clean) < MIN_AGE:
+            st.session_state.age_blocked = True
+            st.rerun()
+        else:
+            st.session_state.age_ok = True
+            st.rerun()
+    st.stop()
+
+# ---------- Storage ----------
+@st.cache_resource
+def init_db():
+    con = sqlite3.connect(DB_PATH)
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS users "
+        "(email TEXT PRIMARY KEY, salt TEXT, pass_hash TEXT, created TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS messages "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, role TEXT, text TEXT, created TEXT)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS wallet "
+        "(email TEXT PRIMARY KEY, credits INTEGER NOT NULL DEFAULT 0)"
+    )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS redemptions "
+        "(code TEXT PRIMARY KEY, email TEXT, created TEXT)"
+    )
+    con.commit()
+    con.close()
+    return True
+
+init_db()
+
+def db_exec(sql, args=()):
+    con = sqlite3.connect(DB_PATH)
+    try:
+        rows = con.execute(sql, args).fetchall()
+        con.commit()
+        return rows
+    finally:
+        con.close()
+
+def hash_pass(passcode, salt_hex):
+    return hashlib.pbkdf2_hmac(
+        "sha256", passcode.encode(), bytes.fromhex(salt_hex), 200_000
+    ).hex()
+
+def sign_in(email, passcode):
+    """Returns (ok, message). Creates the account the first time an email is used."""
+    email = email.strip().lower()
+    if "@" not in email or "." not in email:
+        return False, "Please enter a valid email address."
+    rows = db_exec("SELECT salt, pass_hash FROM users WHERE email=?", (email,))
+    if rows:
+        salt, stored = rows[0]
+        if hmac.compare_digest(hash_pass(passcode, salt), stored):
+            return True, email
+        return False, "Wrong passcode for this email."
+    if len(passcode) < 6:
+        return False, "Choose a passcode of at least 6 characters."
+    salt = secrets.token_hex(16)
+    db_exec(
+        "INSERT INTO users (email, salt, pass_hash, created) VALUES (?,?,?,?)",
+        (email, salt, hash_pass(passcode, salt), datetime.now().isoformat()),
+    )
+    return True, email
+
+def load_history(email):
+    rows = db_exec("SELECT role, text FROM messages WHERE email=? ORDER BY id", (email,))
+    return [{"role": r, "text": t} for r, t in rows]
+
+def add_message(role, text):
+    st.session_state.messages.append({"role": role, "text": text})
+    if st.session_state.user_email:
+        db_exec(
+            "INSERT INTO messages (email, role, text, created) VALUES (?,?,?,?)",
+            (st.session_state.user_email, role, text, datetime.now().isoformat()),
+        )
+
+def get_credits(email):
+    rows = db_exec("SELECT credits FROM wallet WHERE email=?", (email,))
+    return rows[0][0] if rows else 0
+
+def spend_credit(email):
+    db_exec(
+        "UPDATE wallet SET credits = credits - 1 WHERE email=? AND credits > 0",
+        (email,),
+    )
+
+def redeem_code(email, code):
+    code = code.strip()
+    if code not in CODES:
+        return False, "That code is not valid. Check it and try again."
+    if db_exec("SELECT email FROM redemptions WHERE code=?", (code,)):
+        return False, "That code has already been used."
+    db_exec(
+        "INSERT INTO redemptions (code, email, created) VALUES (?,?,?)",
+        (code, email, datetime.now().isoformat()),
+    )
+    db_exec(
+        "INSERT INTO wallet (email, credits) VALUES (?, ?) "
+        "ON CONFLICT(email) DO UPDATE SET credits = credits + excluded.credits",
+        (email, PACK_SIZE),
+    )
+    return True, f"{PACK_SIZE} prediction credits added."
+
+# ---------- Step 3: sign in ----------
+if not st.session_state.user_email:
+    st.markdown("### Sign in to keep your conversations")
+    st.caption("New here? Enter an email and choose a passcode. Returning? Use the same passcode.")
+    with st.form("signin"):
+        email_in = st.text_input("Email")
+        pass_in = st.text_input("Passcode (at least 6 characters)", type="password")
+        submitted = st.form_submit_button("Continue")
+    if submitted:
+        ok, result = sign_in(email_in, pass_in)
+        if ok:
+            st.session_state.user_email = result
+            st.session_state.messages = load_history(result)
+            st.rerun()
+        else:
+            st.error(result)
+    st.stop()
+
+# ---------- Sidebar: account and credits ----------
+st.sidebar.markdown(f"**Signed in as**  \n{st.session_state.user_email}")
+st.sidebar.markdown(f"**Prediction credits:** {get_credits(st.session_state.user_email)}")
+if st.sidebar.button("Sign out"):
+    st.session_state.user_email = None
+    st.session_state.messages = []
+    st.session_state.paywall = False
+    st.session_state.pop("chat", None)
+    st.rerun()
+if st.sidebar.button("Delete my history"):
+    db_exec("DELETE FROM messages WHERE email=?", (st.session_state.user_email,))
+    st.session_state.messages = []
+    st.session_state.pop("chat", None)
+    st.rerun()
+st.sidebar.caption("Credits stay on your account. Deleting history does not remove them.")
+
 st.markdown('<p class="disclaimer">Probabilities are estimates for discussion, not guarantees or betting advice.</p>',
             unsafe_allow_html=True)
 
@@ -170,60 +372,54 @@ client = get_client()
 
 # ---------- Football data (cached to respect rate limits) ----------
 @st.cache_data(ttl=900)
-def epl_upcoming(_key):
+def league_fixtures(code, _key):
     if not _key:
         return None, "No football key found in secrets."
     try:
         r = requests.get(
-            "https://api.football-data.org/v4/competitions/PL/matches",
+            f"https://api.football-data.org/v4/competitions/{code}/matches",
             headers={"X-Auth-Token": _key},
             params={"status": "SCHEDULED"},
             timeout=10,
         )
         if r.status_code != 200:
-            return None, f"Football API returned status {r.status_code}: {r.text[:200]}"
+            return None, f"status {r.status_code}"
         return r.json().get("matches", []), None
     except Exception as e:
-        return None, f"Request failed: {e}"
+        return None, str(e)
 
 @st.cache_data(ttl=3600)
-def epl_table(_key):
+def league_table(code, _key):
     if not _key:
         return None, "No football key found in secrets."
     try:
         r = requests.get(
-            "https://api.football-data.org/v4/competitions/PL/standings",
+            f"https://api.football-data.org/v4/competitions/{code}/standings",
             headers={"X-Auth-Token": _key},
             timeout=10,
         )
         if r.status_code != 200:
-            return None, f"Football API returned status {r.status_code}: {r.text[:200]}"
+            return None, f"status {r.status_code}"
         standings = r.json().get("standings", [])
         table = standings[0].get("table", []) if standings else None
         return table, None
     except Exception as e:
-        return None, f"Request failed: {e}"
+        return None, str(e)
 
-# Temporary diagnostic: shows the real football API result in the sidebar.
-# Remove this block once fixtures load.
-_, _fx_err = epl_upcoming(FOOTBALL_KEY)
-st.sidebar.write("Football key loaded:", bool(FOOTBALL_KEY))
-st.sidebar.write("Fixtures status:", _fx_err or "OK")
-
-def fixtures_context(limit=10):
-    matches, err = epl_upcoming(FOOTBALL_KEY)
+def fixtures_context(code, limit=10):
+    matches, err = league_fixtures(code, FOOTBALL_KEY)
     if not matches:
-        return f"Live fixture data is unavailable right now. ({err or 'no matches returned'})"
+        return f"Live fixture data is unavailable right now ({err or 'no matches returned'})."
     lines = []
     for m in matches[:limit]:
         date = m["utcDate"][:16].replace("T", " ")
         lines.append(f"{date} UTC: {m['homeTeam']['name']} vs {m['awayTeam']['name']}")
-    return "Upcoming Premier League fixtures:\n" + "\n".join(lines)
+    return "Upcoming fixtures:\n" + "\n".join(lines)
 
-def table_context(limit=20):
-    table, err = epl_table(FOOTBALL_KEY)
+def table_context(code, limit=20):
+    table, err = league_table(code, FOOTBALL_KEY)
     if not table:
-        return f"League table is unavailable right now. ({err or 'no table returned'})"
+        return f"League table is unavailable right now ({err or 'no table returned'})."
     lines = []
     for row in table[:limit]:
         lines.append(
@@ -231,14 +427,14 @@ def table_context(limit=20):
             f"W{row['won']} D{row['draw']} L{row['lost']} "
             f"GF{row['goalsFor']} GA{row['goalsAgainst']} Pts{row['points']}"
         )
-    return "Current Premier League table:\n" + "\n".join(lines)
+    return "Current table:\n" + "\n".join(lines)
 
-def match_context():
-    return fixtures_context() + "\n\n" + table_context()
+def match_context(code):
+    return fixtures_context(code) + "\n\n" + table_context(code)
 
-# ---------- Session state (safe even for sessions started earlier) ----------
+# ---------- Chat setup ----------
 SYSTEM_PROMPT = (
-    "You are Matchday Pulse, an English Premier League analyst for football fans. "
+    "You are Matchday Pulse, a football match analyst for fans of top European leagues. "
     "Use only the fixture and table data provided in each message for facts such as "
     "results, positions, and upcoming matches. If the data is missing or does not cover "
     "something, say so instead of guessing. When asked about a match, cover: recent form, "
@@ -251,20 +447,22 @@ SYSTEM_PROMPT = (
     "stats, read it carefully and use it. Keep replies concise and clear."
 )
 
-if "chat" not in st.session_state:
-    st.session_state.chat = client.chats.create(
+def gemini_history(msgs):
+    out = []
+    for m in msgs[-HISTORY_LIMIT:]:
+        role = "user" if m["role"] == "user" else "model"
+        out.append(types.Content(role=role, parts=[types.Part(text=m["text"])]))
+    return out
+
+def new_chat(history):
+    return client.chats.create(
         model=MODEL,
         config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+        history=history,
     )
-st.session_state.setdefault("messages", [])
-st.session_state.setdefault("last_audio", None)
-st.session_state.setdefault("unlocked", False)
-st.session_state.setdefault("paywall", False)
-st.session_state.setdefault("pending_voice", None)
-st.session_state.setdefault("to_send", "")
-st.session_state.setdefault("draft", "")
-st.session_state.setdefault("reply_mode", "Text")
-st.session_state.setdefault("att_n", 0)
+
+if "chat" not in st.session_state:
+    st.session_state.chat = new_chat(gemini_history(st.session_state.messages))
 
 def current_attachment():
     return st.session_state.get(f"att_{st.session_state.att_n}")
@@ -299,21 +497,23 @@ def speak(text):
     except Exception:
         return None
 
-def ask(text_in, label, attachment=None):
-    st.session_state.messages.append({"role": "user", "text": label})
+def ask(text_in, label, league_code, attachment=None):
+    email = st.session_state.user_email
+    add_message("user", label)
 
-    # Predictions and estimates are paid: prompt for payment instead of answering
-    if is_paid_request(text_in) and not st.session_state.unlocked:
+    # Predictions cost one credit each. General questions are free.
+    paid = is_paid_request(text_in)
+    if paid and get_credits(email) < 1:
         st.session_state.paywall = True
-        st.session_state.messages.append({
-            "role": "assistant",
-            "text": "Predictions and probability estimates are part of the paid plan. "
-                    "Get an access code below to unlock them. You can keep asking "
-                    "general questions about fixtures, form, and the table for free.",
-        })
+        add_message(
+            "assistant",
+            "Predictions and probability estimates use prediction credits, and you have none left. "
+            "Get an access code below to add more. General questions about fixtures, form, "
+            "and the table are still free.",
+        )
         return
 
-    question = f"{match_context()}\n\nUser question: {text_in}"
+    question = f"{match_context(league_code)}\n\nUser question: {text_in}"
     content = question
     if attachment is not None:
         part = types.Part.from_bytes(data=attachment.getvalue(), mime_type=attachment.type)
@@ -329,12 +529,19 @@ def ask(text_in, label, attachment=None):
             text = ""
         if text:
             break
+
     if not text:
-        text = "I couldn't get an analysis just now. Please try again or rephrase your question."
-    elif st.session_state.reply_mode in ("Voice", "Both"):
+        add_message("assistant", "I couldn't get an analysis just now. Please try again or rephrase your question.")
+        return
+
+    # Charge the credit only after a real answer was produced
+    if paid:
+        spend_credit(email)
+
+    if st.session_state.reply_mode in ("Voice", "Both"):
         with st.spinner("Preparing voice..."):
             st.session_state.pending_voice = speak(text)
-    st.session_state.messages.append({"role": "assistant", "text": text})
+    add_message("assistant", text)
 
 def transcribe(data):
     try:
@@ -347,20 +554,25 @@ def transcribe(data):
     except Exception:
         return ""
 
-# ---------- Reply mode choice ----------
-st.radio("How should I answer?", REPLY_MODES, key="reply_mode", horizontal=True)
+# ---------- League and reply mode ----------
+c_league, c_mode = st.columns([3, 2], vertical_alignment="center")
+with c_league:
+    st.selectbox("League", list(LEAGUES.keys()), key="league")
+with c_mode:
+    st.radio("Reply", REPLY_MODES, key="reply_mode", horizontal=True)
+
+league_code = LEAGUES[st.session_state.league]
 
 # ---------- Chat history (fixed-height box) ----------
 chat_box = st.container(height=CHAT_HEIGHT, border=False)
 
-# ---------- Attachment indicator ----------
 if current_attachment() is not None:
     st.markdown(
         f'<p class="attach-note">📎 {html.escape(current_attachment().name)} attached</p>',
         unsafe_allow_html=True,
     )
 
-# ---------- Input row (always available) ----------
+# ---------- Input row ----------
 c_plus, c_text, c_mic, c_send = st.columns([1.2, 9, 1.6, 1.6], vertical_alignment="center")
 with c_plus:
     with st.popover("+"):
@@ -390,7 +602,7 @@ if prompt:
     att = current_attachment()
     st.audio(SEND_SOUND, format="audio/wav", autoplay=True)
     label = prompt if att is None else f"📎 {att.name}\n{prompt}"
-    ask(prompt, label, attachment=att)
+    ask(prompt, label, league_code, attachment=att)
     st.session_state.att_n += 1
     st.rerun()
 elif audio is not None:
@@ -402,16 +614,16 @@ elif audio is not None:
             heard = transcribe(data)
         if heard:
             st.audio(SEND_SOUND, format="audio/wav", autoplay=True)
-            ask(heard, "🎤 " + heard)
+            ask(heard, "🎤 " + heard, league_code)
             st.rerun()
         else:
             st.warning("I couldn't hear that clearly. Please record again.")
 
-# ---------- Render history with avatars ----------
+# ---------- Render history ----------
 with chat_box:
     if not st.session_state.messages:
         st.markdown(
-            '<div class="empty">Ask about this weekend\'s fixtures, a team\'s form,<br>'
+            '<div class="empty">Pick a league, then ask about its fixtures, a team\'s form,<br>'
             'or upload a table screenshot to get started.</div>',
             unsafe_allow_html=True,
         )
@@ -435,16 +647,18 @@ with chat_box:
         st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
         st.session_state.pending_voice = None
 
-# ---------- Payment and access code (below the conversation, only when needed) ----------
-if st.session_state.paywall and not st.session_state.unlocked:
-    st.info("Predictions and estimates need an access code. Pay to unlock them.")
+# ---------- Buy or redeem credits (only when needed) ----------
+if st.session_state.paywall:
+    st.info("Predictions use credits. Pay to get an access code, then enter it to add credits.")
     if PAY_LINK:
         st.markdown(f"👉 [Pay here to get your code]({PAY_LINK})")
-    code = st.text_input("Enter your access code", type="password")
-    if st.button("Unlock"):
-        if code.strip() in CODES:
-            st.session_state.unlocked = True
+    with st.form("redeem"):
+        code_in = st.text_input("Enter your access code", type="password")
+        redeem_submit = st.form_submit_button("Add credits")
+    if redeem_submit:
+        ok, msg = redeem_code(st.session_state.user_email, code_in)
+        if ok:
             st.session_state.paywall = False
             st.rerun()
         else:
-            st.error("That code is not valid. Check it and try again.")
+            st.error(msg)
