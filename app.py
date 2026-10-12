@@ -490,11 +490,8 @@ FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
 
 # Payment details (set in Streamlit secrets, never in code)
 PAY_PRICE = get_secret("PAY_PRICE", "100")
-PAYBILL = get_secret("PAYBILL", "not set")
-PAY_ACCOUNT_HELP = get_secret("PAY_ACCOUNT_HELP", "your phone number")
-BANK_NAME = get_secret("BANK_NAME", "not set")
-BANK_ACCOUNT_NAME = get_secret("BANK_ACCOUNT_NAME", "not set")
-BANK_ACCOUNT_NUMBER = get_secret("BANK_ACCOUNT_NUMBER", "not set")
+PAYBILL = get_secret("PAYBILL_NUMBER", "not set")
+ACCOUNT_NUMBER = get_secret("ACCOUNT_NUMBER", "not set")
 
 @st.cache_resource
 def get_client():
@@ -725,7 +722,7 @@ def ask(text_in, label, league_code, attachment=None):
         add_message(
             "assistant",
             "Predictions and probability estimates use prediction credits, and you have none left. "
-            "Choose a payment option below to add more. General questions about fixtures, form, "
+            "Pay below to add more. General questions about fixtures, form, "
             "and the table are still free.",
         )
         return
@@ -758,7 +755,7 @@ def ask(text_in, label, league_code, attachment=None):
             st.session_state.paywall = True
             add_message(
                 "assistant",
-                "That was a prediction, which uses prediction credits. Choose a payment option below to add more.",
+                "That was a prediction, which uses prediction credits. Pay below to add more.",
             )
             return
 
@@ -921,28 +918,17 @@ if st.session_state.messages:
             st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
             st.session_state.pending_voice = None
 
-# ---------- Two-option paywall: M-Pesa or bank ----------
+# ---------- Paywall: pay to paybill only ----------
 if st.session_state.paywall:
-    st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {PAY_PRICE}. Choose how to pay:")
-
-    tab_mpesa, tab_bank = st.tabs(["Pay with M-Pesa", "Pay by bank"])
-
-    with tab_mpesa:
-        st.markdown(
-            f"1. Go to **Lipa na M-Pesa → Paybill**\n"
-            f"2. Paybill number: **{PAYBILL}**\n"
-            f"3. Account number: **{PAY_ACCOUNT_HELP}**\n"
-            f"4. Amount: **KSh {PAY_PRICE}**\n"
-            f"5. Enter your PIN, then fill in the form with your M-Pesa code."
-        )
-
-    with tab_bank:
-        st.markdown(
-            f"1. Bank: **{BANK_NAME}**\n"
-            f"3. Account number: **{BANK_ACCOUNT_NUMBER}**\n"
-            f"5. Amount: **KSh {PAY_PRICE}**\n"
-            f"6. Then fill in the form with your bank reference number."
-        )
+    st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {PAY_PRICE}.")
+    st.markdown(
+        f"**Pay with M-Pesa**\n\n"
+        f"1. Go to **Lipa na M-Pesa → Paybill**\n"
+        f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
+        f"3. Account number: **{ACCOUNT_NUMBER}**\n"
+        f"4. Amount: **KSh {PAY_PRICE}**\n"
+        f"5. Enter your PIN, then fill in the form with your M-Pesa code."
+    )
 
     if PAY_LINK:
         st.link_button("Open payment form", PAY_LINK, use_container_width=True)
