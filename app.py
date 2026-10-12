@@ -133,6 +133,13 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 }
 .fx-date { color: #64748B; font-size: 0.78rem; white-space: nowrap; }
 
+.dtable-wrap { overflow-x: auto; background: #FFFFFF; border-radius: 12px; padding: 6px; margin: 6px 0; border: 1px solid #BFDBFE; }
+.dtable { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+.dtable th { background: #1D4ED8; color: #FFFFFF; padding: 6px 4px; text-align: center; white-space: nowrap; }
+.dtable td { padding: 6px 4px; text-align: center; color: #1E3A8A; border-bottom: 1px solid #DBEAFE; white-space: nowrap; }
+.dtable td.name { text-align: left; font-weight: 600; }
+.dtable tr:nth-child(even) td { background: #F8FBFF; }
+
 .row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
 .row-bot { justify-content: flex-start; }
@@ -481,6 +488,14 @@ CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
 PAY_LINK = get_secret("PAY_LINK")
 FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
 
+# Payment details (set in Streamlit secrets, never in code)
+PAY_PRICE = get_secret("PAY_PRICE", "100")
+PAYBILL = get_secret("PAYBILL", "not set")
+PAY_ACCOUNT_HELP = get_secret("PAY_ACCOUNT_HELP", "your phone number")
+BANK_NAME = get_secret("BANK_NAME", "not set")
+BANK_ACCOUNT_NAME = get_secret("BANK_ACCOUNT_NAME", "not set")
+BANK_ACCOUNT_NUMBER = get_secret("BANK_ACCOUNT_NUMBER", "not set")
+
 @st.cache_resource
 def get_client():
     return genai.Client(api_key=key)
@@ -528,6 +543,64 @@ def fmt_kickoff(utc_str):
     dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00")).astimezone(EAT)
     return dt.strftime("%a %d %b, %H:%M")
 
+def table_intent(text):
+    t = text.lower()
+    if any(w in t for w in ["table", "standings", "league position"]):
+        return "table"
+    if any(w in t for w in ["fixture", "upcoming", "schedule", "next match", "next games"]):
+        return "fixtures"
+    return None
+
+def dtable(headers, rows):
+    head = "".join(f"<th>{h}</th>" for h in headers)
+    body = "".join(rows)
+    return (f'<div class="dtable-wrap"><table class="dtable">'
+            f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
+
+def fixtures_html(code):
+    matches, err = league_fixtures(code, FOOTBALL_KEY)
+    if not matches:
+        return f"<p>Fixtures are unavailable right now ({html.escape(str(err or 'no matches'))}).</p>"
+    rows = []
+    for m in matches[:20]:
+        rows.append(
+            "<tr>"
+            f"<td>{html.escape(str(m.get('matchday') or '-'))}</td>"
+            f"<td>{fmt_kickoff(m['utcDate'])}</td>"
+            f"<td class='name'>{html.escape(m['homeTeam']['name'])}</td>"
+            "<td>vs</td>"
+            f"<td class='name'>{html.escape(m['awayTeam']['name'])}</td>"
+            "</tr>"
+        )
+    return dtable(["Matchday", "Kickoff (Nairobi)", "Home", "", "Away"], rows)
+
+def standings_html(code):
+    table, err = league_table(code, FOOTBALL_KEY)
+    if not table:
+        return f"<p>The table is unavailable right now ({html.escape(str(err or 'no table'))}).</p>"
+    rows = []
+    for r in table:
+        gd = r.get("goalDifference", 0)
+        gd_txt = f"+{gd}" if gd > 0 else str(gd)
+        form = r.get("form") or "-"
+        form = " ".join(x for x in form.split(",") if x) if form != "-" else "-"
+        rows.append(
+            "<tr>"
+            f"<td>{r['position']}</td>"
+            f"<td class='name'>{html.escape(r['team']['name'])}</td>"
+            f"<td>{r['playedGames']}</td>"
+            f"<td>{r['won']}</td>"
+            f"<td>{r['draw']}</td>"
+            f"<td>{r['lost']}</td>"
+            f"<td>{r['goalsFor']}</td>"
+            f"<td>{r['goalsAgainst']}</td>"
+            f"<td>{gd_txt}</td>"
+            f"<td><b>{r['points']}</b></td>"
+            f"<td>{html.escape(form)}</td>"
+            "</tr>"
+        )
+    return dtable(["#", "Team", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Form"], rows)
+
 def fixtures_context(code, limit=10):
     matches, err = league_fixtures(code, FOOTBALL_KEY)
     if not matches:
@@ -572,6 +645,8 @@ SYSTEM_PROMPT = (
 def gemini_history(msgs):
     out = []
     for m in msgs[-HISTORY_LIMIT:]:
+        if m["role"] not in ("user", "assistant"):
+            continue  # table rows are display-only, never sent to the model
         role = "user" if m["role"] == "user" else "model"
         out.append(types.Content(role=role, parts=[types.Part(text=m["text"])]))
     return out
@@ -632,6 +707,17 @@ def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
 
+    # Tables and fixtures come straight from the football data (free, no model call).
+    # Prediction questions are excluded so they still go through the paid path.
+    if not needs_credit(text_in):
+        kind = table_intent(text_in)
+        if kind == "table":
+            add_message("table", standings_html(league_code))
+            return
+        if kind == "fixtures":
+            add_message("table", fixtures_html(league_code))
+            return
+
     # Step 1: decide whether this message costs a credit, before answering
     paid = needs_credit(text_in)
     if paid and get_credits(email) < 1:
@@ -639,7 +725,7 @@ def ask(text_in, label, league_code, attachment=None):
         add_message(
             "assistant",
             "Predictions and probability estimates use prediction credits, and you have none left. "
-            "Get an access code below to add more. General questions about fixtures, form, "
+            "Choose a payment option below to add more. General questions about fixtures, form, "
             "and the table are still free.",
         )
         return
@@ -672,7 +758,7 @@ def ask(text_in, label, league_code, attachment=None):
             st.session_state.paywall = True
             add_message(
                 "assistant",
-                "That was a prediction, which uses prediction credits. Get an access code below to add more.",
+                "That was a prediction, which uses prediction credits. Choose a payment option below to add more.",
             )
             return
 
@@ -813,6 +899,9 @@ elif audio is not None:
 if st.session_state.messages:
     with chat_box:
         for m in st.session_state.messages:
+            if m["role"] == "table":
+                st.markdown(m["text"], unsafe_allow_html=True)
+                continue
             safe = html.escape(m["text"]).replace("\n", "<br>")
             if m["role"] == "user":
                 st.markdown(
@@ -832,11 +921,34 @@ if st.session_state.messages:
             st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
             st.session_state.pending_voice = None
 
-# ---------- Buy or redeem credits (only when needed) ----------
+# ---------- Two-option paywall: M-Pesa or bank ----------
 if st.session_state.paywall:
-    st.info("Predictions use credits. Pay to get an access code, then enter it to add credits.")
+    st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {PAY_PRICE}. Choose how to pay:")
+
+    tab_mpesa, tab_bank = st.tabs(["Pay with M-Pesa", "Pay by bank"])
+
+    with tab_mpesa:
+        st.markdown(
+            f"1. Go to **Lipa na M-Pesa → Paybill**\n"
+            f"2. Paybill number: **{PAYBILL}**\n"
+            f"3. Account number: **{PAY_ACCOUNT_HELP}**\n"
+            f"4. Amount: **KSh {PAY_PRICE}**\n"
+            f"5. Enter your PIN, then fill in the form with your M-Pesa code."
+        )
+
+    with tab_bank:
+        st.markdown(
+            f"1. Bank: **{BANK_NAME}**\n"
+            f"2. Account name: **{BANK_ACCOUNT_NAME}**\n"
+            f"3. Account number: **{BANK_ACCOUNT_NUMBER}**\n"
+            f"4. Reference: **your phone number**\n"
+            f"5. Amount: **KSh {PAY_PRICE}**\n"
+            f"6. Then fill in the form with your bank reference number."
+        )
+
     if PAY_LINK:
-        st.markdown(f"👉 [Pay here to get your code]({PAY_LINK})")
+        st.link_button("Open payment form", PAY_LINK, use_container_width=True)
+
     with st.form("redeem"):
         code_in = st.text_input("Enter your access code", type="password")
         redeem_submit = st.form_submit_button("Add credits")
