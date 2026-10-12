@@ -41,7 +41,8 @@ APP_TITLE = f"⚽ {APP_NAME}"
 APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
 APP_ROLE_TAG = "Match Analyst"
 HISTORY_LIMIT = 20
-PACK_SIZE = 5   # prediction credits per access code
+PACK_SIZE = 5             # prediction credits per access code
+REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is redeemed
 MIN_AGE = 18
 NEW_CHAT_TITLE = "New chat"
 EAT = timezone(timedelta(hours=3))  # Nairobi time
@@ -87,8 +88,9 @@ TERMS = """
 3. **Age:** You must be 18 or older. You will be asked to confirm your age. This is based on your own answer.
 4. **Your information:** To save your conversations, we store your email address, a scrambled form of your passcode, and the messages you send and receive. You can delete your chats at any time from the sidebar. Do not send personal or sensitive information in your messages.
 5. **Prediction credits:** Predictions use credits. Credits are bought with an access code after payment is confirmed. Each code gives a fixed number of credits, can be used once, and is not refundable after it is redeemed. Codes are personal and must not be shared.
-6. **Accuracy:** Data comes from third-party sources and may be delayed or incomplete. We are not liable for decisions made from the app.
-7. **Changes:** We may update these terms. Continued use means you accept the current version.
+6. **Referrals:** You may share your referral code. A friend who signs up with it and buys their first pack gives you free credits. Referral credits have no cash value.
+7. **Accuracy:** Data comes from third-party sources and may be delayed or incomplete. We are not liable for decisions made from the app.
+8. **Changes:** We may update these terms. Continued use means you accept the current version.
 """
 
 st.set_page_config(page_title=APP_NAME, page_icon="⚽", layout="centered")
@@ -266,8 +268,9 @@ def get_user(email):
     res = sb.table("users").select("salt,pass_hash").eq("email", email).execute()
     return res.data[0] if res.data else None
 
-def sign_in(email, passcode):
-    """Returns (ok, message). Creates the account the first time an email is used."""
+def sign_in(email, passcode, ref_in=""):
+    """Returns (ok, message). Creates the account the first time an email is used.
+    ref_in is an optional referral code, used only for brand-new accounts."""
     email = email.strip().lower()
     if "@" not in email or "." not in email:
         return False, "Please enter a valid email address."
@@ -283,8 +286,19 @@ def sign_in(email, passcode):
         "email": email,
         "salt": salt,
         "pass_hash": hash_pass(passcode, salt),
+        "ref_code": secrets.token_hex(4).upper(),
         "created": now_iso(),
     }).execute()
+
+    # Link the new account to whoever shared the referral code
+    ref_in = (ref_in or "").strip().upper()
+    if ref_in:
+        referrer = sb.table("users").select("email").eq("ref_code", ref_in).execute().data
+        if referrer and referrer[0]["email"] != email:
+            sb.table("referrals").insert({
+                "referee": email, "referrer": referrer[0]["email"],
+            }).execute()
+
     log_event("signup", email)
     return True, email
 
@@ -368,6 +382,28 @@ def spend_credit(email):
     if c > 0:
         sb.table("wallet").update({"credits": c - 1}).eq("email", email).execute()
 
+def get_my_ref_code(email):
+    """Returns the user's referral code, creating one if the account has none yet."""
+    res = sb.table("users").select("ref_code").eq("email", email).execute().data
+    code = res[0]["ref_code"] if res else None
+    if not code:
+        code = secrets.token_hex(4).upper()
+        sb.table("users").update({"ref_code": code}).eq("email", email).execute()
+    return code
+
+def reward_referrer(email):
+    """Called after a referred friend's first paid redemption. Rewards only once."""
+    rows = (sb.table("referrals").select("referrer")
+            .eq("referee", email).eq("rewarded", False).execute().data)
+    if not rows:
+        return
+    referrer = rows[0]["referrer"]
+    sb.table("referrals").update({"rewarded": True}).eq("referee", email).execute()
+    sb.table("wallet").upsert({
+        "email": referrer,
+        "credits": get_credits(referrer) + REFERRAL_CREDITS,
+    }).execute()
+
 def redeem_code(email, code):
     code = code.strip()
     if code not in CODES:
@@ -380,6 +416,7 @@ def redeem_code(email, code):
     except Exception:
         return False, "That code has already been used."
     sb.table("wallet").upsert({"email": email, "credits": get_credits(email) + PACK_SIZE}).execute()
+    reward_referrer(email)
     return True, f"{PACK_SIZE} prediction credits added."
 
 # ---------- Step 1: terms ----------
@@ -420,9 +457,10 @@ if not st.session_state.user_email:
     with st.form("signin"):
         email_in = st.text_input("Email")
         pass_in = st.text_input("Passcode (at least 6 characters)", type="password")
+        ref_txt = st.text_input("Referral code (optional, new accounts only)")
         submitted = st.form_submit_button("Continue")
     if submitted:
-        ok, result = sign_in(email_in, pass_in)
+        ok, result = sign_in(email_in, pass_in, ref_txt)
         if ok:
             log_event("signin", result)
             st.session_state.user_email = result
@@ -470,6 +508,13 @@ if st.sidebar.button("Sign out"):
     st.rerun()
 
 st.sidebar.caption(track_line())
+
+my_code = get_my_ref_code(st.session_state.user_email)
+st.sidebar.markdown(f"**Your referral code:** `{my_code}`")
+st.sidebar.caption(
+    f"Share it. You get {REFERRAL_CREDITS} free credit when a friend who signed up "
+    f"with it buys their first pack."
+)
 st.sidebar.caption("Credits stay on your account when you delete chats.")
 
 st.markdown('<p class="disclaimer">Probabilities are estimates for discussion, not guarantees or betting advice.</p>',
@@ -1210,4 +1255,5 @@ if is_owner(st.session_state.user_email):
         st.metric("Packs sold", packs)
         st.metric("Credits sold", packs * PACK_SIZE)
         st.metric("Revenue (KSh)", packs * int(PAY_PRICE))
+        st.metric("Referrals rewarded", count_rows("referrals", rewarded=True))
         st.metric("Chats started", count_rows("conversations"))
