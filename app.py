@@ -42,6 +42,7 @@ APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by tex
 APP_ROLE_TAG = "Match Analyst"
 HISTORY_LIMIT = 20
 PACK_SIZE = 5             # prediction credits per access code
+CREDIT_KSH = 20           # shillings per prediction credit (PAY_PRICE should equal PACK_SIZE * CREDIT_KSH)
 REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is redeemed
 MIN_AGE = 18
 NEW_CHAT_TITLE = "New chat"
@@ -87,7 +88,7 @@ TERMS = """
 2. **Not betting advice:** Estimates are not guarantees and are not betting tips. We do not advise on bets.
 3. **Age:** You must be 18 or older. You will be asked to confirm your age. This is based on your own answer.
 4. **Your information:** To save your conversations, we store your email address, a scrambled form of your passcode, and the messages you send and receive. You can delete your chats at any time from the sidebar. Do not send personal or sensitive information in your messages.
-5. **Prediction credits:** Predictions use credits. Credits are bought with an access code after payment is confirmed. Each code gives a fixed number of credits, can be used once, and is not refundable after it is redeemed. Codes are personal and must not be shared.
+5. **Prediction credits:** Predictions use credits. Credits are bought with an access code after payment is confirmed. Each code gives a fixed number of credits, can be used once, and is not refundable after it is redeemed. Each credit is worth a fixed amount shown in your account. Credits are a prepaid service, not a deposit, and cannot be withdrawn as cash. Codes are personal and must not be shared.
 6. **Referrals:** You may share your referral code. A friend who signs up with it and buys their first pack gives you free credits. Referral credits have no cash value.
 7. **Accuracy:** Data comes from third-party sources and may be delayed or incomplete. We are not liable for decisions made from the app.
 8. **Changes:** We may update these terms. Continued use means you accept the current version.
@@ -372,15 +373,29 @@ def delete_all_chats():
     sb.table("conversations").delete().eq("email", email).execute()
     start_new_chat()
 
-# ----- Credits -----
+# ----- Credits and account ledger -----
 def get_credits(email):
     res = sb.table("wallet").select("credits").eq("email", email).execute()
     return res.data[0]["credits"] if res.data else 0
+
+def ledger_add(email, kind, credits, note=""):
+    """Record one movement in the account history. Positive adds credits, negative spends them."""
+    sb.table("ledger").insert({
+        "email": email, "kind": kind, "credits": credits,
+        "note": note, "created": now_iso(),
+    }).execute()
+
+def account_view(email):
+    credits = get_credits(email)
+    history = (sb.table("ledger").select("kind,credits,note,created")
+               .eq("email", email).order("id", desc=True).limit(15).execute().data)
+    return credits, history
 
 def spend_credit(email):
     c = get_credits(email)
     if c > 0:
         sb.table("wallet").update({"credits": c - 1}).eq("email", email).execute()
+        ledger_add(email, "prediction", -1, "Prediction")
 
 def get_my_ref_code(email):
     """Returns the user's referral code, creating one if the account has none yet."""
@@ -403,6 +418,7 @@ def reward_referrer(email):
         "email": referrer,
         "credits": get_credits(referrer) + REFERRAL_CREDITS,
     }).execute()
+    ledger_add(referrer, "referral", REFERRAL_CREDITS, "Friend's first pack")
 
 def redeem_code(email, code):
     code = code.strip()
@@ -416,8 +432,9 @@ def redeem_code(email, code):
     except Exception:
         return False, "That code has already been used."
     sb.table("wallet").upsert({"email": email, "credits": get_credits(email) + PACK_SIZE}).execute()
+    ledger_add(email, "top_up", PACK_SIZE, "Access code pack")
     reward_referrer(email)
-    return True, f"{PACK_SIZE} prediction credits added."
+    return True, f"{PACK_SIZE} prediction credits added (KSh {PACK_SIZE * CREDIT_KSH})."
 
 # ---------- Step 1: terms ----------
 if not st.session_state.accepted_terms:
@@ -474,13 +491,24 @@ if not st.session_state.user_email:
             st.error(result)
     st.stop()
 
-# ---------- Sidebar: account, chats, credits ----------
-credit_label = (
-    "unlimited (owner)" if is_owner(st.session_state.user_email)
-    else get_credits(st.session_state.user_email)
-)
+# ---------- Sidebar: account, chats, balance ----------
 st.sidebar.markdown(f"**Signed in as**  \n{st.session_state.user_email}")
-st.sidebar.markdown(f"**Prediction credits:** {credit_label}")
+
+if is_owner(st.session_state.user_email):
+    st.sidebar.markdown("**Account balance:** unlimited (owner)")
+else:
+    credits, history = account_view(st.session_state.user_email)
+    st.sidebar.markdown(
+        f"**Account balance:** KSh {credits * CREDIT_KSH}  \n"
+        f"{credits} prediction credits at KSh {CREDIT_KSH} each"
+    )
+    with st.sidebar.expander("🧾 Account history"):
+        for h in history:
+            sign = "+" if h["credits"] > 0 else ""
+            when = h["created"][:16].replace("T", " ")
+            st.write(f"{when}  \n{h['note']}: {sign}{h['credits']} credit(s)")
+        if not history:
+            st.caption("No activity yet.")
 
 st.sidebar.button("➕ New chat", on_click=start_new_chat, use_container_width=True)
 
