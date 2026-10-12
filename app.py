@@ -192,6 +192,7 @@ st.session_state.setdefault("draft", "")
 st.session_state.setdefault("reply_mode", "Text")
 st.session_state.setdefault("league", list(LEAGUES.keys())[0])
 st.session_state.setdefault("att_n", 0)
+st.session_state.setdefault("visit_logged", False)
 
 # ---------- Header ----------
 st.markdown(f"""
@@ -203,37 +204,6 @@ st.markdown(f"""
     <span class="brand-badge">{APP_ROLE_TAG}</span>
 </div>
 """, unsafe_allow_html=True)
-
-# ---------- Step 1: terms ----------
-if not st.session_state.accepted_terms:
-    st.markdown(TERMS)
-    agree = st.checkbox("I have read and accept the terms.")
-    if st.button("Continue", disabled=not agree):
-        st.session_state.accepted_terms = True
-        st.rerun()
-    st.stop()
-
-# ---------- Step 2: age check ----------
-if st.session_state.age_blocked:
-    st.error(f"Sorry, you must be {MIN_AGE} or older to use {APP_NAME}, so you can't continue.")
-    st.stop()
-
-if not st.session_state.age_ok:
-    st.markdown("### Confirm your age")
-    with st.form("age"):
-        age_txt = st.text_input("How old are you?", placeholder="e.g. 21")
-        age_submit = st.form_submit_button("Continue")
-    if age_submit:
-        age_clean = age_txt.strip()
-        if not age_clean.isdigit() or not (1 <= int(age_clean) <= 120):
-            st.error("Please enter your age as a number.")
-        elif int(age_clean) < MIN_AGE:
-            st.session_state.age_blocked = True
-            st.rerun()
-        else:
-            st.session_state.age_ok = True
-            st.rerun()
-    st.stop()
 
 # ---------- Storage ----------
 @st.cache_resource
@@ -260,6 +230,10 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS redemptions "
         "(code TEXT PRIMARY KEY, email TEXT, created TEXT)"
     )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS events "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, email TEXT, created TEXT)"
+    )
     con.commit()
     con.close()
     return True
@@ -284,6 +258,28 @@ def db_insert_id(sql, args=()):
     finally:
         con.close()
 
+def log_event(kind, email=None):
+    db_exec(
+        "INSERT INTO events (kind, email, created) VALUES (?,?,?)",
+        (kind, email, datetime.now().isoformat()),
+    )
+
+def count_events(kind, days=None):
+    if days:
+        since = (datetime.now() - timedelta(days=days)).isoformat()
+        rows = db_exec("SELECT COUNT(*) FROM events WHERE kind=? AND created>=?", (kind, since))
+    else:
+        rows = db_exec("SELECT COUNT(*) FROM events WHERE kind=?", (kind,))
+    return rows[0][0]
+
+def count_sql(sql):
+    return db_exec(sql)[0][0]
+
+# Log one visit per browser session (not on every rerun)
+if not st.session_state.visit_logged:
+    log_event("visit")
+    st.session_state.visit_logged = True
+
 def hash_pass(passcode, salt_hex):
     return hashlib.pbkdf2_hmac(
         "sha256", passcode.encode(), bytes.fromhex(salt_hex), 200_000
@@ -307,6 +303,7 @@ def sign_in(email, passcode):
         "INSERT INTO users (email, salt, pass_hash, created) VALUES (?,?,?,?)",
         (email, salt, hash_pass(passcode, salt), datetime.now().isoformat()),
     )
+    log_event("signup", email)
     return True, email
 
 # ----- Conversations -----
@@ -391,6 +388,37 @@ def redeem_code(email, code):
     )
     return True, f"{PACK_SIZE} prediction credits added."
 
+# ---------- Step 1: terms ----------
+if not st.session_state.accepted_terms:
+    st.markdown(TERMS)
+    agree = st.checkbox("I have read and accept the terms.")
+    if st.button("Continue", disabled=not agree):
+        st.session_state.accepted_terms = True
+        st.rerun()
+    st.stop()
+
+# ---------- Step 2: age check ----------
+if st.session_state.age_blocked:
+    st.error(f"Sorry, you must be {MIN_AGE} or older to use {APP_NAME}, so you can't continue.")
+    st.stop()
+
+if not st.session_state.age_ok:
+    st.markdown("### Confirm your age")
+    with st.form("age"):
+        age_txt = st.text_input("How old are you?", placeholder="e.g. 21")
+        age_submit = st.form_submit_button("Continue")
+    if age_submit:
+        age_clean = age_txt.strip()
+        if not age_clean.isdigit() or not (1 <= int(age_clean) <= 120):
+            st.error("Please enter your age as a number.")
+        elif int(age_clean) < MIN_AGE:
+            st.session_state.age_blocked = True
+            st.rerun()
+        else:
+            st.session_state.age_ok = True
+            st.rerun()
+    st.stop()
+
 # ---------- Step 3: sign in ----------
 if not st.session_state.user_email:
     st.markdown("### Sign in to keep your conversations")
@@ -402,6 +430,7 @@ if not st.session_state.user_email:
     if submitted:
         ok, result = sign_in(email_in, pass_in)
         if ok:
+            log_event("signin", result)
             st.session_state.user_email = result
             # Every sign-in starts a fresh chat; older chats stay in the sidebar
             st.session_state.conv_id = create_conversation(result)
@@ -487,6 +516,7 @@ if not key:
 CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
 PAY_LINK = get_secret("PAY_LINK")
 FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
+ADMIN_EMAIL = get_secret("ADMIN_EMAIL").strip().lower()
 
 # Payment details (set in Streamlit secrets, never in code)
 PAY_PRICE = get_secret("PAY_PRICE", "100")
@@ -943,3 +973,18 @@ if st.session_state.paywall:
             st.rerun()
         else:
             st.error(msg)
+
+# ---------- Owner stats (only visible to ADMIN_EMAIL) ----------
+if ADMIN_EMAIL and st.session_state.user_email == ADMIN_EMAIL:
+    with st.sidebar.expander("📊 Owner stats"):
+        packs = count_sql("SELECT COUNT(*) FROM redemptions")
+        st.metric("Visits (all time)", count_events("visit"))
+        st.metric("Visits (last 7 days)", count_events("visit", 7))
+        st.metric("Sign-ups", count_events("signup"))
+        st.metric("Unique people who signed in",
+                  count_sql("SELECT COUNT(DISTINCT email) FROM events WHERE kind='signin'"))
+        st.metric("Sign-ins (total)", count_events("signin"))
+        st.metric("Packs sold", packs)
+        st.metric("Credits sold", packs * PACK_SIZE)
+        st.metric("Revenue (KSh)", packs * int(PAY_PRICE))
+        st.metric("Chats started", count_sql("SELECT COUNT(*) FROM conversations"))
