@@ -939,9 +939,7 @@ if st.session_state.paywall:
     with tab_bank:
         st.markdown(
             f"1. Bank: **{BANK_NAME}**\n"
-            f"2. Account name: **{BANK_ACCOUNT_NAME}**\n"
             f"3. Account number: **{BANK_ACCOUNT_NUMBER}**\n"
-            f"4. Reference: **your phone number**\n"
             f"5. Amount: **KSh {PAY_PRICE}**\n"
             f"6. Then fill in the form with your bank reference number."
         )
