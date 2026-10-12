@@ -1,4 +1,4 @@
-streamlit
-requests
-google-genai
-supabase
+   streamlit
+   requests
+   google-genai
+   supabase
