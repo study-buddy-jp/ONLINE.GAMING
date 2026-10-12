@@ -490,7 +490,7 @@ FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
 
 # Payment details (set in Streamlit secrets, never in code)
 PAY_PRICE = get_secret("PAY_PRICE", "100")
-PAYBILL = get_secret("PAYBILL_NUMBER", "not set")
+PAYBILL_NUMBER = get_secret("PAYBILL_NUMBER", "not set")
 ACCOUNT_NUMBER = get_secret("ACCOUNT_NUMBER", "not set")
 
 @st.cache_resource
