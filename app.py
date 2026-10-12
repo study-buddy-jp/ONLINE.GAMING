@@ -16,6 +16,20 @@ import streamlit as st
 from google import genai
 from google.genai import types
 
+def get_secret(name, default=""):
+    value = os.environ.get(name)
+    if value:
+        return value
+    try:
+        return st.secrets[name]
+    except Exception:
+        return default
+
+ADMIN_EMAIL = get_secret("ADMIN_EMAIL").strip().lower()
+
+def is_owner(email):
+    return bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
+
 MODEL = "gemini-flash-lite-latest"          # analysis model
 TRANSCRIBE_MODEL = "gemini-flash-latest"    # speech to text
 TTS_MODEL = "gemini-2.5-flash-preview-tts"  # text to speech (voice replies)
@@ -195,6 +209,7 @@ st.session_state.setdefault("reply_mode", "Text")
 st.session_state.setdefault("league", list(LEAGUES.keys())[0])
 st.session_state.setdefault("att_n", 0)
 st.session_state.setdefault("visit_logged", False)
+st.session_state.setdefault("resolved", False)
 
 # ---------- Header ----------
 st.markdown(f"""
@@ -236,6 +251,13 @@ def init_db():
         "CREATE TABLE IF NOT EXISTS events "
         "(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, email TEXT, created TEXT)"
     )
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS predictions "
+        "(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, league TEXT, "
+        "home_id INTEGER, away_id INTEGER, home TEXT, away TEXT, "
+        "p_home REAL, p_draw REAL, p_away REAL, created TEXT, "
+        "outcome TEXT, correct INTEGER)"
+    )
     con.commit()
     con.close()
     return True
@@ -276,6 +298,21 @@ def count_events(kind, days=None):
 
 def count_sql(sql):
     return db_exec(sql)[0][0]
+
+def track_line():
+    """Public accuracy line. Counts every checked prediction the app made, including the owner's."""
+    c, n = db_exec(
+        "SELECT COALESCE(SUM(correct),0), COUNT(*) FROM predictions WHERE outcome IS NOT NULL"
+    )[0]
+    if n == 0:
+        return ("All predictions made by Matchday Prediction: none have been checked yet. "
+                "Results appear here once matches are played.")
+    since = db_exec("SELECT MIN(created) FROM predictions")[0][0][:10]
+    if n < 10:
+        return (f"All predictions made by Matchday Prediction: {c} of {n} checked predictions had the "
+                f"most likely outcome correct so far (since {since}). That is too few to judge.")
+    return (f"All predictions made by Matchday Prediction: most likely outcome correct in {c} of {n} "
+            f"checked predictions ({c/n:.0%}), since {since}. Estimates, not guarantees.")
 
 # Log one visit per browser session (not on every rerun)
 if not st.session_state.visit_logged:
@@ -477,6 +514,7 @@ if st.sidebar.button("Sign out"):
     st.session_state.pop("chat", None)
     st.rerun()
 
+st.sidebar.caption(track_line())
 st.sidebar.caption("Credits stay on your account when you delete chats.")
 
 st.markdown('<p class="disclaimer">Probabilities are estimates for discussion, not guarantees or betting advice.</p>',
@@ -505,15 +543,6 @@ def make_chime(notes, rate=24000):
 
 SEND_SOUND = make_chime(((880, 0.10), (1320, 0.12)))
 
-def get_secret(name, default=""):
-    value = os.environ.get(name)
-    if value:
-        return value
-    try:
-        return st.secrets[name]
-    except Exception:
-        return default
-
 key = get_secret("GEMINI_API_KEY")
 if not key:
     st.error("The app is not set up yet (API key missing).")
@@ -522,10 +551,6 @@ if not key:
 CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
 PAY_LINK = get_secret("PAY_LINK")
 FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
-ADMIN_EMAIL = get_secret("ADMIN_EMAIL").strip().lower()
-
-def is_owner(email):
-    return bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
 
 # Payment details (set in Streamlit secrets, never in code)
 PAY_PRICE = get_secret("PAY_PRICE", "100")
@@ -813,6 +838,71 @@ def find_teams_in_question(code, text):
         return found[0], found[1]
     return None
 
+def find_team_rows(code, text):
+    """Return (home, away) team dicts in the order named in the question."""
+    table, _ = league_table(code, FOOTBALL_KEY)
+    if not table:
+        return None
+    t = text.lower()
+    hits = []
+    for row in table:
+        for name in (row["team"]["name"], row["team"].get("shortName") or ""):
+            i = t.find(name.lower()) if name else -1
+            if i >= 0:
+                hits.append((i, row["team"]))
+                break
+    hits.sort(key=lambda x: x[0])
+    if len(hits) >= 2:
+        return hits[0][1], hits[1][1]
+    return None
+
+def parse_probs(text):
+    t = text.lower()
+    def grab(label):
+        m = re.search(label + r"[^\d%\n]{0,25}?(\d+(?:\.\d+)?)\s*%", t)
+        return float(m.group(1)) if m else None
+    h, d, a = grab(r"home win"), grab(r"draw"), grab(r"away win")
+    if None in (h, d, a):
+        return None
+    return h, d, a
+
+def log_prediction(email, code, home, away, probs):
+    db_exec(
+        "INSERT INTO predictions (email, league, home_id, away_id, home, away, "
+        "p_home, p_draw, p_away, created) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (email, code, home["id"], away["id"], home["name"], away["name"],
+         probs[0], probs[1], probs[2], datetime.now(timezone.utc).isoformat()),
+    )
+
+def resolve_predictions():
+    rows = db_exec(
+        "SELECT id, home_id, away_id, p_home, p_draw, p_away, created "
+        "FROM predictions WHERE outcome IS NULL"
+    )
+    for pid, hid, aid, ph, pd_, pa, created in rows:
+        made = datetime.fromisoformat(created)
+        if made.tzinfo is None:
+            made = made.replace(tzinfo=timezone.utc)
+        for g in team_finished(hid, FOOTBALL_KEY) or []:
+            ids = {g["homeTeam"]["id"], g["awayTeam"]["id"]}
+            ft = (g.get("score") or {}).get("fullTime") or {}
+            if aid not in ids or ft.get("home") is None:
+                continue
+            played = datetime.fromisoformat(g["utcDate"].replace("Z", "+00:00"))
+            if played < made:
+                continue
+            if g["homeTeam"]["id"] == hid:
+                hg, ag = ft["home"], ft["away"]
+            else:
+                hg, ag = ft["away"], ft["home"]
+            outcome = "H" if hg > ag else ("A" if ag > hg else "D")
+            predicted = max([("H", ph), ("D", pd_), ("A", pa)], key=lambda x: x[1])[0]
+            db_exec(
+                "UPDATE predictions SET outcome=?, correct=? WHERE id=?",
+                (outcome, int(predicted == outcome), pid),
+            )
+            break
+
 # ---------- Chat setup ----------
 SYSTEM_PROMPT = (
     "You are Matchday Prediction, a football match analyst for fans of top European leagues. "
@@ -918,6 +1008,7 @@ def ask(text_in, label, league_code, attachment=None):
 
     # Build context: full team profiles when two teams are named, otherwise the table and fixtures
     teams = find_teams_in_question(league_code, text_in) if paid else None
+    pair = find_team_rows(league_code, text_in) if paid else None
     if teams:
         context = prediction_context(league_code, teams[0], teams[1])
     else:
@@ -958,6 +1049,12 @@ def ask(text_in, label, league_code, attachment=None):
     if paid and not is_owner(email):
         spend_credit(email)
 
+    # Log every paid prediction, including the owner's, for the track record
+    if paid and pair:
+        probs = parse_probs(text)
+        if probs:
+            log_prediction(email, league_code, pair[0], pair[1], probs)
+
     if st.session_state.reply_mode in ("Voice", "Both"):
         with st.spinner("Preparing voice..."):
             st.session_state.pending_voice = speak(text)
@@ -975,7 +1072,7 @@ def transcribe(data):
         return ""
 
 def render_home(league_code):
-    """Start screen shown before the first message: welcome, fixtures, quick actions."""
+    """Start screen shown before the first message: welcome, track record, fixtures, quick actions."""
     hero = (
         '<div class="hero">'
         '<h3>Welcome to Matchday Prediction</h3>'
@@ -988,6 +1085,7 @@ def render_home(league_code):
         '</div></div>'
     )
     st.markdown(hero, unsafe_allow_html=True)
+    st.caption(track_line())
 
     st.markdown('<p class="quick-title">Next matches</p>', unsafe_allow_html=True)
     matches, err = league_fixtures(league_code, FOOTBALL_KEY)
@@ -1027,6 +1125,11 @@ with c_mode:
     st.radio("Reply", REPLY_MODES, key="reply_mode", horizontal=True)
 
 league_code = LEAGUES[st.session_state.league]
+
+# Check predictions against finished results once per session
+if not st.session_state.resolved:
+    resolve_predictions()
+    st.session_state.resolved = True
 
 # ---------- Start screen (empty chat) or chat box (has messages) ----------
 if st.session_state.messages:
