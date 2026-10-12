@@ -8,13 +8,12 @@ import html
 import hmac
 import hashlib
 import secrets
-import sqlite3
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import requests
 import streamlit as st
 from google import genai
 from google.genai import types
+from supabase import create_client
 
 def get_secret(name, default=""):
     value = os.environ.get(name)
@@ -41,7 +40,6 @@ APP_NAME = "Matchday Prediction"
 APP_TITLE = f"⚽ {APP_NAME}"
 APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
 APP_ROLE_TAG = "Match Analyst"
-DB_PATH = Path(__file__).parent / "matchday.db"
 HISTORY_LIMIT = 20
 PACK_SIZE = 5   # prediction credits per access code
 MIN_AGE = 18
@@ -222,92 +220,84 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ---------- Storage ----------
+# ---------- Database (Supabase) ----------
 @st.cache_resource
-def init_db():
-    con = sqlite3.connect(DB_PATH)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS users "
-        "(email TEXT PRIMARY KEY, salt TEXT, pass_hash TEXT, created TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS conversations "
-        "(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, title TEXT, created TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS chat_messages "
-        "(id INTEGER PRIMARY KEY AUTOINCREMENT, conv_id INTEGER, email TEXT, "
-        "role TEXT, text TEXT, created TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS wallet "
-        "(email TEXT PRIMARY KEY, credits INTEGER NOT NULL DEFAULT 0)"
-    )
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS redemptions "
-        "(code TEXT PRIMARY KEY, email TEXT, created TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS events "
-        "(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, email TEXT, created TEXT)"
-    )
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS predictions "
-        "(id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT, league TEXT, "
-        "home_id INTEGER, away_id INTEGER, home TEXT, away TEXT, "
-        "p_home REAL, p_draw REAL, p_away REAL, created TEXT, "
-        "outcome TEXT, correct INTEGER)"
-    )
-    con.commit()
-    con.close()
-    return True
+def get_db():
+    url = get_secret("SUPABASE_URL")
+    key = get_secret("SUPABASE_SECRET_KEY")
+    if not url or not key:
+        return None
+    return create_client(url, key)
 
-init_db()
+sb = get_db()
+if sb is None:
+    st.error("The app is not set up yet (database secrets missing).")
+    st.stop()
 
-def db_exec(sql, args=()):
-    con = sqlite3.connect(DB_PATH)
-    try:
-        rows = con.execute(sql, args).fetchall()
-        con.commit()
-        return rows
-    finally:
-        con.close()
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
-def db_insert_id(sql, args=()):
-    con = sqlite3.connect(DB_PATH)
-    try:
-        cur = con.execute(sql, args)
-        con.commit()
-        return cur.lastrowid
-    finally:
-        con.close()
+def count_rows(table, **eq):
+    q = sb.table(table).select("*", count="exact", head=True)
+    for col, val in eq.items():
+        q = q.eq(col, val)
+    return q.execute().count or 0
 
 def log_event(kind, email=None):
-    db_exec(
-        "INSERT INTO events (kind, email, created) VALUES (?,?,?)",
-        (kind, email, datetime.now().isoformat()),
-    )
+    sb.table("events").insert({"kind": kind, "email": email, "created": now_iso()}).execute()
 
 def count_events(kind, days=None):
+    q = sb.table("events").select("*", count="exact", head=True).eq("kind", kind)
     if days:
-        since = (datetime.now() - timedelta(days=days)).isoformat()
-        rows = db_exec("SELECT COUNT(*) FROM events WHERE kind=? AND created>=?", (kind, since))
-    else:
-        rows = db_exec("SELECT COUNT(*) FROM events WHERE kind=?", (kind,))
-    return rows[0][0]
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        q = q.gte("created", since)
+    return q.execute().count or 0
 
-def count_sql(sql):
-    return db_exec(sql)[0][0]
+def count_unique_signins():
+    rows = sb.table("events").select("email").eq("kind", "signin").execute().data
+    return len({r["email"] for r in rows if r.get("email")})
+
+def hash_pass(passcode, salt_hex):
+    return hashlib.pbkdf2_hmac(
+        "sha256", passcode.encode(), bytes.fromhex(salt_hex), 200_000
+    ).hex()
+
+def get_user(email):
+    res = sb.table("users").select("salt,pass_hash").eq("email", email).execute()
+    return res.data[0] if res.data else None
+
+def sign_in(email, passcode):
+    """Returns (ok, message). Creates the account the first time an email is used."""
+    email = email.strip().lower()
+    if "@" not in email or "." not in email:
+        return False, "Please enter a valid email address."
+    user = get_user(email)
+    if user:
+        if hmac.compare_digest(hash_pass(passcode, user["salt"]), user["pass_hash"]):
+            return True, email
+        return False, "Wrong passcode for this email."
+    if len(passcode) < 6:
+        return False, "Choose a passcode of at least 6 characters."
+    salt = secrets.token_hex(16)
+    sb.table("users").insert({
+        "email": email,
+        "salt": salt,
+        "pass_hash": hash_pass(passcode, salt),
+        "created": now_iso(),
+    }).execute()
+    log_event("signup", email)
+    return True, email
 
 def track_line():
     """Public accuracy line. Counts every checked prediction the app made, including the owner's."""
-    c, n = db_exec(
-        "SELECT COALESCE(SUM(correct),0), COUNT(*) FROM predictions WHERE outcome IS NOT NULL"
-    )[0]
+    rows = sb.table("predictions").select("outcome,correct,created").execute().data
+    checked = [r for r in rows if r.get("outcome") is not None]
+    n = len(checked)
+    c = sum(int(r.get("correct") or 0) for r in checked)
     if n == 0:
         return ("All predictions made by Matchday Prediction: none have been checked yet. "
                 "Results appear here once matches are played.")
-    since = db_exec("SELECT MIN(created) FROM predictions")[0][0][:10]
+    since = min(r["created"] for r in rows)[:10] if rows else "-"
     if n < 10:
         return (f"All predictions made by Matchday Prediction: {c} of {n} checked predictions had the "
                 f"most likely outcome correct so far (since {since}). That is too few to judge.")
@@ -319,67 +309,36 @@ if not st.session_state.visit_logged:
     log_event("visit")
     st.session_state.visit_logged = True
 
-def hash_pass(passcode, salt_hex):
-    return hashlib.pbkdf2_hmac(
-        "sha256", passcode.encode(), bytes.fromhex(salt_hex), 200_000
-    ).hex()
-
-def sign_in(email, passcode):
-    """Returns (ok, message). Creates the account the first time an email is used."""
-    email = email.strip().lower()
-    if "@" not in email or "." not in email:
-        return False, "Please enter a valid email address."
-    rows = db_exec("SELECT salt, pass_hash FROM users WHERE email=?", (email,))
-    if rows:
-        salt, stored = rows[0]
-        if hmac.compare_digest(hash_pass(passcode, salt), stored):
-            return True, email
-        return False, "Wrong passcode for this email."
-    if len(passcode) < 6:
-        return False, "Choose a passcode of at least 6 characters."
-    salt = secrets.token_hex(16)
-    db_exec(
-        "INSERT INTO users (email, salt, pass_hash, created) VALUES (?,?,?,?)",
-        (email, salt, hash_pass(passcode, salt), datetime.now().isoformat()),
-    )
-    log_event("signup", email)
-    return True, email
-
 # ----- Conversations -----
 def create_conversation(email):
-    return db_insert_id(
-        "INSERT INTO conversations (email, title, created) VALUES (?,?,?)",
-        (email, NEW_CHAT_TITLE, datetime.now().isoformat()),
-    )
+    res = sb.table("conversations").insert({
+        "email": email, "title": NEW_CHAT_TITLE, "created": now_iso(),
+    }).execute()
+    return res.data[0]["id"]
 
 def list_conversations(email):
-    return db_exec(
-        "SELECT id, title FROM conversations WHERE email=? ORDER BY id DESC LIMIT 30",
-        (email,),
-    )
+    res = (sb.table("conversations").select("id,title").eq("email", email)
+           .order("id", desc=True).limit(30).execute())
+    return [(r["id"], r["title"]) for r in res.data]
 
 def load_conv_messages(conv_id):
-    rows = db_exec(
-        "SELECT role, text FROM chat_messages WHERE conv_id=? ORDER BY id",
-        (conv_id,),
-    )
-    return [{"role": r, "text": t} for r, t in rows]
+    res = (sb.table("chat_messages").select("role,text").eq("conv_id", conv_id)
+           .order("id").execute())
+    return [{"role": r["role"], "text": r["text"]} for r in res.data]
 
 def add_message(role, text):
     st.session_state.messages.append({"role": role, "text": text})
     email = st.session_state.user_email
     conv_id = st.session_state.conv_id
     if email and conv_id:
-        db_exec(
-            "INSERT INTO chat_messages (conv_id, email, role, text, created) VALUES (?,?,?,?,?)",
-            (conv_id, email, role, text, datetime.now().isoformat()),
-        )
+        sb.table("chat_messages").insert({
+            "conv_id": conv_id, "email": email, "role": role,
+            "text": text, "created": now_iso(),
+        }).execute()
         if role == "user":
             # Name the chat after its first question
-            db_exec(
-                "UPDATE conversations SET title=? WHERE id=? AND title=?",
-                (text[:40], conv_id, NEW_CHAT_TITLE),
-            )
+            sb.table("conversations").update({"title": text[:40]}) \
+                .eq("id", conv_id).eq("title", NEW_CHAT_TITLE).execute()
 
 def start_new_chat():
     st.session_state.conv_id = create_conversation(st.session_state.user_email)
@@ -395,36 +354,32 @@ def open_chat(conv_id):
 
 def delete_all_chats():
     email = st.session_state.user_email
-    db_exec("DELETE FROM chat_messages WHERE email=?", (email,))
-    db_exec("DELETE FROM conversations WHERE email=?", (email,))
+    sb.table("chat_messages").delete().eq("email", email).execute()
+    sb.table("conversations").delete().eq("email", email).execute()
     start_new_chat()
 
 # ----- Credits -----
 def get_credits(email):
-    rows = db_exec("SELECT credits FROM wallet WHERE email=?", (email,))
-    return rows[0][0] if rows else 0
+    res = sb.table("wallet").select("credits").eq("email", email).execute()
+    return res.data[0]["credits"] if res.data else 0
 
 def spend_credit(email):
-    db_exec(
-        "UPDATE wallet SET credits = credits - 1 WHERE email=? AND credits > 0",
-        (email,),
-    )
+    c = get_credits(email)
+    if c > 0:
+        sb.table("wallet").update({"credits": c - 1}).eq("email", email).execute()
 
 def redeem_code(email, code):
     code = code.strip()
     if code not in CODES:
         return False, "That code is not valid. Check it and try again."
-    if db_exec("SELECT email FROM redemptions WHERE code=?", (code,)):
+    if sb.table("redemptions").select("code").eq("code", code).execute().data:
         return False, "That code has already been used."
-    db_exec(
-        "INSERT INTO redemptions (code, email, created) VALUES (?,?,?)",
-        (code, email, datetime.now().isoformat()),
-    )
-    db_exec(
-        "INSERT INTO wallet (email, credits) VALUES (?, ?) "
-        "ON CONFLICT(email) DO UPDATE SET credits = credits + excluded.credits",
-        (email, PACK_SIZE),
-    )
+    try:
+        # The primary key on code makes this insert fail if two people redeem at once
+        sb.table("redemptions").insert({"code": code, "email": email, "created": now_iso()}).execute()
+    except Exception:
+        return False, "That code has already been used."
+    sb.table("wallet").upsert({"email": email, "credits": get_credits(email) + PACK_SIZE}).execute()
     return True, f"{PACK_SIZE} prediction credits added."
 
 # ---------- Step 1: terms ----------
@@ -867,20 +822,22 @@ def parse_probs(text):
     return h, d, a
 
 def log_prediction(email, code, home, away, probs):
-    db_exec(
-        "INSERT INTO predictions (email, league, home_id, away_id, home, away, "
-        "p_home, p_draw, p_away, created) VALUES (?,?,?,?,?,?,?,?,?,?)",
-        (email, code, home["id"], away["id"], home["name"], away["name"],
-         probs[0], probs[1], probs[2], datetime.now(timezone.utc).isoformat()),
-    )
+    sb.table("predictions").insert({
+        "email": email, "league": code,
+        "home_id": home["id"], "away_id": away["id"],
+        "home": home["name"], "away": away["name"],
+        "p_home": probs[0], "p_draw": probs[1], "p_away": probs[2],
+        "created": now_iso(),
+    }).execute()
 
 def resolve_predictions():
-    rows = db_exec(
-        "SELECT id, home_id, away_id, p_home, p_draw, p_away, created "
-        "FROM predictions WHERE outcome IS NULL"
-    )
-    for pid, hid, aid, ph, pd_, pa, created in rows:
-        made = datetime.fromisoformat(created)
+    rows = (sb.table("predictions")
+            .select("id,home_id,away_id,p_home,p_draw,p_away,created")
+            .is_("outcome", "null").execute().data)
+    for r in rows:
+        pid, hid, aid = r["id"], r["home_id"], r["away_id"]
+        ph, pd_, pa = r["p_home"], r["p_draw"], r["p_away"]
+        made = datetime.fromisoformat(r["created"])
         if made.tzinfo is None:
             made = made.replace(tzinfo=timezone.utc)
         for g in team_finished(hid, FOOTBALL_KEY) or []:
@@ -897,10 +854,9 @@ def resolve_predictions():
                 hg, ag = ft["away"], ft["home"]
             outcome = "H" if hg > ag else ("A" if ag > hg else "D")
             predicted = max([("H", ph), ("D", pd_), ("A", pa)], key=lambda x: x[1])[0]
-            db_exec(
-                "UPDATE predictions SET outcome=?, correct=? WHERE id=?",
-                (outcome, int(predicted == outcome), pid),
-            )
+            sb.table("predictions").update({
+                "outcome": outcome, "correct": int(predicted == outcome),
+            }).eq("id", pid).execute()
             break
 
 # ---------- Chat setup ----------
@@ -1245,14 +1201,13 @@ if st.session_state.paywall:
 # ---------- Owner stats (only visible to ADMIN_EMAIL) ----------
 if is_owner(st.session_state.user_email):
     with st.sidebar.expander("📊 Owner stats"):
-        packs = count_sql("SELECT COUNT(*) FROM redemptions")
+        packs = count_rows("redemptions")
         st.metric("Visits (all time)", count_events("visit"))
         st.metric("Visits (last 7 days)", count_events("visit", 7))
         st.metric("Sign-ups", count_events("signup"))
-        st.metric("Unique people who signed in",
-                  count_sql("SELECT COUNT(DISTINCT email) FROM events WHERE kind='signin'"))
+        st.metric("Unique people who signed in", count_unique_signins())
         st.metric("Sign-ins (total)", count_events("signin"))
         st.metric("Packs sold", packs)
         st.metric("Credits sold", packs * PACK_SIZE)
         st.metric("Revenue (KSh)", packs * int(PAY_PRICE))
-        st.metric("Chats started", count_sql("SELECT COUNT(*) FROM conversations"))
+        st.metric("Chats started", count_rows("conversations"))
