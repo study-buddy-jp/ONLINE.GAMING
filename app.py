@@ -160,8 +160,9 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 .tcard-form { margin-top: 8px; font-size: 0.82rem; color: #334155; }
 .tcard-form span { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 6px; color: #FFFFFF; font-weight: 700; font-size: 0.72rem; margin-right: 3px; }
 .f-w { background: #16A34A; } .f-d { background: #94A3B8; } .f-l { background: #DC2626; }
-.pbox { background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 14px; padding: 12px 14px; margin: 8px 0; }
+.pbox { background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 14px; padding: 12px 14px; margin: 8px 0; font-size: 0.86rem; color: #334155; line-height: 1.6; }
 .pbox-title { color: #1E3A8A; font-weight: 700; margin-bottom: 6px; }
+.pbox b { color: #1E3A8A; }
 .pbar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 0.84rem; color: #1E3A8A; }
 .pbar-row span { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pbar { flex: 1; background: #DBEAFE; border-radius: 999px; height: 10px; overflow: hidden; }
@@ -330,6 +331,45 @@ def track_line():
                 f"most likely outcome correct so far (since {since}). That is too few to judge.")
     return (f"All predictions made by Matchday Prediction: most likely outcome correct in {c} of {n} "
             f"checked predictions ({c/n:.0%}), since {since}. Estimates, not guarantees.")
+
+def prediction_stats(email=None):
+    """Counts of predictions, checked results, correct and wrong. Pass an email for one person's record."""
+    q = sb.table("predictions").select("outcome,correct,created")
+    if email:
+        q = q.eq("email", email)
+    rows = q.execute().data
+    played = [r for r in rows if r.get("outcome") is not None]
+    correct = sum(1 for r in played if r.get("correct"))
+    since = min((r["created"] for r in rows), default=None)
+    return {
+        "total": len(rows),
+        "played": len(played),
+        "correct": correct,
+        "wrong": len(played) - correct,
+        "pending": len(rows) - len(played),
+        "since": since[:10] if since else None,
+    }
+
+def stats_card(s, title):
+    """A record card: totals, correct and wrong with percentages, and how many are still pending."""
+    if s["total"] == 0:
+        return f'<div class="pbox"><div class="pbox-title">{title}</div>No predictions yet.</div>'
+    p = s["played"]
+    correct_pct = f"{s['correct'] / p * 100:.1f}%" if p else "-"
+    wrong_pct = f"{s['wrong'] / p * 100:.1f}%" if p else "-"
+    since_line = f"<div>Since: <b>{s['since']}</b></div>" if s["since"] else ""
+    early = ("" if p >= 30 else
+             '<div style="font-size:0.78rem;color:#64748B;margin-top:6px">'
+             'Early figures: fewer than 30 checked predictions, so the percentages will still move.</div>')
+    body = (
+        f"<div>Total predictions made: <b>{s['total']}</b></div>"
+        f"<div>Checked against results: <b>{p}</b></div>"
+        f"<div>Correct (most likely outcome): <b>{s['correct']} of {p} ({correct_pct})</b></div>"
+        f"<div>Wrong: <b>{s['wrong']} of {p} ({wrong_pct})</b></div>"
+        f"<div>Awaiting result: <b>{s['pending']}</b></div>"
+        f"{since_line}"
+    )
+    return f'<div class="pbox"><div class="pbox-title">{title}</div>{body}{early}</div>'
 
 # Log one visit per browser session (not on every rerun)
 if not st.session_state.visit_logged:
@@ -547,7 +587,9 @@ if st.sidebar.button("Sign out"):
     st.session_state.pop("chat", None)
     st.rerun()
 
-st.sidebar.caption(track_line())
+st.sidebar.markdown(stats_card(prediction_stats(), "All predictions"), unsafe_allow_html=True)
+st.sidebar.markdown(stats_card(prediction_stats(st.session_state.user_email), "My record"),
+                    unsafe_allow_html=True)
 
 my_code = get_my_ref_code(st.session_state.user_email)
 st.sidebar.markdown(f"**Your referral code:** `{my_code}`")
@@ -1167,7 +1209,8 @@ LABELS = {
            "failed": "Sikuweza kupata uchambuzi sasa hivi. Tafadhali jaribu tena au uulize kwa njia nyingine."},
 }
 
-RESULT_WORDS = ["result", "score", "outcome", "finished", "full time"]
+RESULT_WORDS = ["result", "score", "outcome", "finished", "full time",
+                "accuracy", "record", "percentage", "how many"]
 MINE_WORDS = [
     "my prediction", "my predictions", "predictions were", "predicted", "i predicted",
     "today's predictions", "todays predictions", "past predictions", "previous predictions",
@@ -1223,8 +1266,11 @@ def my_predictions_html(email, today_only=False):
     return summary + dtable(["Made", "Match", "Most likely", "Result", ""], body)
 
 def results_block(text_in, email, league_code):
-    """Answer a results or my-predictions question. Free: no model call, no credit."""
+    """Answer a results, record, or my-predictions question. Free: no model call, no credit."""
     t = text_in.lower()
+    if any(w in t for w in ["accuracy", "record", "percentage", "how many"]):
+        return (stats_card(prediction_stats(email), "My record")
+                + stats_card(prediction_stats(), "All predictions"))
     if is_mine_intent(text_in):
         return my_predictions_html(email, today_only="today" in t)
     if "all" in t or "every" in t:
@@ -1253,7 +1299,7 @@ def ask(text_in, label, league_code, attachment=None):
     st.session_state.lang = detect_lang(text_in)
     L = LABELS[st.session_state.lang]
 
-    # Results and my-predictions questions are answered from data, free, before the credit check
+    # Results, records and my-predictions questions are answered from data, free, before the credit check
     if results_intent(text_in):
         add_message("table", results_block(text_in, email, league_code))
         return
@@ -1364,7 +1410,8 @@ def render_home(league_code):
         '</div></div>'
     )
     st.markdown(hero, unsafe_allow_html=True)
-    st.caption(track_line())
+    st.markdown(stats_card(prediction_stats(), "Track record: all predictions"),
+                unsafe_allow_html=True)
 
     st.markdown('<p class="quick-title">Next matches</p>', unsafe_allow_html=True)
     matches, err = league_fixtures(league_code, FOOTBALL_KEY)
@@ -1535,3 +1582,9 @@ if is_owner(st.session_state.user_email):
         st.metric("Revenue (KSh)", packs * int(PAY_PRICE))
         st.metric("Referrals rewarded", count_rows("referrals", rewarded=True))
         st.metric("Chats started", count_rows("conversations"))
+        ps = prediction_stats()
+        st.metric("Predictions made (all)", ps["total"])
+        st.metric("Checked against results", ps["played"])
+        st.metric("Correct", ps["correct"])
+        st.metric("Wrong", ps["wrong"])
+        st.metric("Awaiting result", ps["pending"])
