@@ -222,6 +222,7 @@ st.session_state.setdefault("league", list(LEAGUES.keys())[0])
 st.session_state.setdefault("att_n", 0)
 st.session_state.setdefault("visit_logged", False)
 st.session_state.setdefault("resolved", False)
+st.session_state.setdefault("lang", "en")
 
 # ---------- Header ----------
 st.markdown(f"""
@@ -1100,20 +1101,51 @@ def team_card(team_id, team_name, league_code):
             f'{badge}</div>')
     return f'<div class="tcard">{head}{"".join(parts)}</div>'
 
+# Common Swahili words. Two or more in a message switch the reply to Swahili.
+SW_WORDS = {
+    "habari", "mechi", "nani", "je", "ni", "naomba", "nataka", "unaweza", "sasa",
+    "leo", "kesho", "karibu", "timu", "utabiri", "msimamo", "ratiba", "kwa", "na",
+    "wapi", "gani", "vipi", "ipi", "asante", "tafadhali",
+}
+
+def detect_lang(text):
+    """Return 'sw' if the message has at least two common Swahili words, otherwise 'en'."""
+    words = set(re.findall(r"[a-zA-Z]+", text.lower()))
+    return "sw" if len(words & SW_WORDS) >= 2 else "en"
+
+LABELS = {
+    "en": {"chances": "Estimated chances", "draw": "Draw", "reply_in": "English",
+           "paywall": ("Predictions and probability estimates use prediction credits, and you have none left. "
+                       "Pay below to add more. General questions about fixtures, form, "
+                       "and the table are still free."),
+           "was_prediction": "That was a prediction, which uses prediction credits. Pay below to add more.",
+           "failed": "I couldn't get an analysis just now. Please try again or rephrase your question."},
+    "sw": {"chances": "Uwezekano unaokadiriwa", "draw": "Sare", "reply_in": "Swahili",
+           "paywall": ("Utabiri na makadirio ya uwezekano hutumia salio la utabiri, nawe huna salio. "
+                       "Lipa hapa chini ili kuongeza. Maswali ya ratiba, msimamo na fomu bado ni bure."),
+           "was_prediction": "Hilo lilikuwa utabiri, unaotumia salio la utabiri. Lipa hapa chini ili kuongeza.",
+           "failed": "Sikuweza kupata uchambuzi sasa hivi. Tafadhali jaribu tena au uulize kwa njia nyingine."},
+}
+
 def prob_bars(home, away, probs):
-    """The estimated chances, shown as bars at the bottom of a prediction."""
-    rows = [(home, probs[0]), ("Draw", probs[1]), (away, probs[2])]
+    """The estimated chances at the bottom of a prediction, in the current language."""
+    L = LABELS[st.session_state.get("lang", "en")]
+    rows = [(home, probs[0]), (L["draw"], probs[1]), (away, probs[2])]
     body = "".join(
         f'<div class="pbar-row"><span>{html.escape(label)}</span>'
         f'<div class="pbar"><div class="pfill" style="width:{p:.0f}%"></div></div>'
         f'<b>{p:.0f}%</b></div>'
         for label, p in rows
     )
-    return f'<div class="pbox"><div class="pbox-title">Estimated chances</div>{body}</div>'
+    return f'<div class="pbox"><div class="pbox-title">{L["chances"]}</div>{body}</div>'
 
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
+
+    # Follow the language of the message just sent
+    st.session_state.lang = detect_lang(text_in)
+    L = LABELS[st.session_state.lang]
 
     # Tables and fixtures come straight from the football data (free, no model call).
     if not needs_credit(text_in):
@@ -1128,12 +1160,7 @@ def ask(text_in, label, league_code, attachment=None):
     paid = needs_credit(text_in)
     if paid and not is_owner(email) and get_credits(email) < 1:
         st.session_state.paywall = True
-        add_message(
-            "assistant",
-            "Predictions and probability estimates use prediction credits, and you have none left. "
-            "Pay below to add more. General questions about fixtures, form, "
-            "and the table are still free.",
-        )
+        add_message("assistant", L["paywall"])
         return
 
     teams = find_teams_in_question(league_code, text_in) if paid else None
@@ -1143,11 +1170,11 @@ def ask(text_in, label, league_code, attachment=None):
     else:
         context = match_context(league_code)
 
-    # For a prediction, ask for a fixed short format so the bottom of the answer is clean
-    instruction = ""
+    # Language and format instructions, added to each message so the reply language follows the user
+    instruction = f"\n\nReply in {L['reply_in']}."
     if paid and pair:
-        instruction = (
-            "\n\nReply only in this format, with no team headers or long paragraphs:\n"
+        instruction += (
+            "\nReply only in this format, with no team headers or long paragraphs:\n"
             "Home win: X%\nDraw: X%\nAway win: X%\n"
             "Key reasons:\n- reason 1\n- reason 2\n- reason 3"
         )
@@ -1169,7 +1196,7 @@ def ask(text_in, label, league_code, attachment=None):
             break
 
     if not text:
-        add_message("assistant", "I couldn't get an analysis just now. Please try again or rephrase your question.")
+        add_message("assistant", L["failed"])
         return
 
     # Guard: an unpaid answer with percentages counts as a prediction
@@ -1177,10 +1204,7 @@ def ask(text_in, label, league_code, attachment=None):
         paid = True
         if get_credits(email) < 1:
             st.session_state.paywall = True
-            add_message(
-                "assistant",
-                "That was a prediction, which uses prediction credits. Pay below to add more.",
-            )
+            add_message("assistant", L["was_prediction"])
             return
 
     if paid and not is_owner(email):
