@@ -13,9 +13,6 @@ Contact for privacy requests: **[PRIVACY EMAIL]**.
 
 The App is an information and analysis tool for football fans. It shows fixtures, league tables, team form and head-to-head records, and produces estimated probabilities for discussion. It is not a betting service. It does not accept stakes on match results and does not pay out winnings.
 
-## 3. Not betting advice
-
-Estimates are not guarantees. Nothing in the App is a betting tip or a recommendation to place a bet. We do not advise on bets, and you should not rely on the App to make betting decisions.
 
 ## 4. Eligibility
 
