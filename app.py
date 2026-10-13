@@ -63,9 +63,9 @@ LEAGUES = {
 QUICK_ACTIONS = [
     ("📅 Upcoming fixtures", "What are the upcoming fixtures in this league?"),
     ("🏆 League table", "Show me the current table and who is in the top 4."),
+    ("📋 Recent results", "Show the recent results of all leagues."),
+    ("🎯 My predictions", "What were my predictions and their outcomes?"),
     ("🔥 Best form", "Which teams have the best form right now?"),
-    ("📊 Explain a stat", "Explain what goals for and goals against tell me about a team."),
-    ("🆚 Compare two teams", "Compare the two strongest teams in this league."),
     ("🔮 Predict a match", "Predict the next match of the top team in the table."),
 ]
 
@@ -692,6 +692,24 @@ def team_scheduled(team_id, _key):
     except Exception:
         return None
 
+@st.cache_data(ttl=3600)
+def finished_matches(code, _key):
+    """Finished matches for one league. Cached for an hour."""
+    if not _key:
+        return []
+    try:
+        r = requests.get(
+            f"https://api.football-data.org/v4/competitions/{code}/matches",
+            headers={"X-Auth-Token": _key},
+            params={"status": "FINISHED"},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("matches", [])
+    except Exception:
+        return []
+
 def fmt_kickoff(utc_str):
     """Turn football-data's UTC time into Nairobi time, e.g. 'Sat 18 Oct, 17:30'."""
     dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00")).astimezone(EAT)
@@ -758,6 +776,28 @@ def standings_html(code):
             "</tr>"
         )
     return dtable(["#", "Team", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Form"], rows)
+
+def results_html(codes, limit=30):
+    rows = []
+    for code in codes:
+        for m in finished_matches(code, FOOTBALL_KEY):
+            ft = (m.get("score") or {}).get("fullTime") or {}
+            if ft.get("home") is None or ft.get("away") is None:
+                continue
+            rows.append((m["utcDate"], m["homeTeam"]["name"], ft["home"], ft["away"], m["awayTeam"]["name"]))
+    rows.sort(reverse=True)
+    if not rows:
+        return "<p>No finished results to show yet.</p>"
+    body = [
+        "<tr>"
+        f"<td>{fmt_kickoff(d)}</td>"
+        f"<td class='name'>{html.escape(h)}</td>"
+        f"<td><b>{hs} - {as_}</b></td>"
+        f"<td class='name'>{html.escape(a)}</td>"
+        "</tr>"
+        for d, h, hs, as_, a in rows[:limit]
+    ]
+    return dtable(["Date (Nairobi)", "Home", "Score", "Away"], body)
 
 def fixtures_context(code, limit=10):
     matches, err = league_fixtures(code, FOOTBALL_KEY)
@@ -1127,6 +1167,72 @@ LABELS = {
            "failed": "Sikuweza kupata uchambuzi sasa hivi. Tafadhali jaribu tena au uulize kwa njia nyingine."},
 }
 
+RESULT_WORDS = ["result", "score", "outcome", "finished", "full time"]
+MINE_WORDS = [
+    "my prediction", "my predictions", "predictions were", "predicted", "i predicted",
+    "today's predictions", "todays predictions", "past predictions", "previous predictions",
+    "my picks",
+]
+
+def results_intent(text):
+    t = text.lower()
+    return any(w in t for w in RESULT_WORDS + MINE_WORDS)
+
+def is_mine_intent(text):
+    t = text.lower()
+    return any(w in t for w in MINE_WORDS)
+
+def my_predictions_html(email, today_only=False):
+    L = LABELS[st.session_state.get("lang", "en")]
+    rows = (sb.table("predictions")
+            .select("home,away,p_home,p_draw,p_away,outcome,correct,created")
+            .eq("email", email).order("id", desc=True).limit(50).execute().data)
+    if today_only:
+        today = datetime.now(EAT).date()
+        rows = [r for r in rows
+                if datetime.fromisoformat(r["created"]).astimezone(EAT).date() == today]
+    if not rows:
+        return "<p>No predictions to show for this period.</p>"
+
+    played = [r for r in rows if r["outcome"] is not None]
+    summary = ""
+    if played:
+        right = sum(1 for r in played if r["correct"])
+        summary = f"<p>Most likely outcome correct in {right} of {len(played)} played matches.</p>"
+
+    body = []
+    for r in rows:
+        probs = {"H": r["p_home"], "D": r["p_draw"], "A": r["p_away"]}
+        names = {"H": r["home"], "D": L["draw"], "A": r["away"]}
+        pick = max(probs, key=probs.get)
+        if r["outcome"] is None:
+            res, mark = "Not played yet", "-"
+        else:
+            res = names[r["outcome"]]
+            mark = "✔" if r["correct"] else "✘"
+        when = datetime.fromisoformat(r["created"]).astimezone(EAT).strftime("%d %b")
+        body.append(
+            "<tr>"
+            f"<td>{when}</td>"
+            f"<td class='name'>{html.escape(r['home'])} vs {html.escape(r['away'])}</td>"
+            f"<td>{html.escape(names[pick])} ({probs[pick]:.0f}%)</td>"
+            f"<td>{html.escape(res)}</td>"
+            f"<td><b>{mark}</b></td>"
+            "</tr>"
+        )
+    return summary + dtable(["Made", "Match", "Most likely", "Result", ""], body)
+
+def results_block(text_in, email, league_code):
+    """Answer a results or my-predictions question. Free: no model call, no credit."""
+    t = text_in.lower()
+    if is_mine_intent(text_in):
+        return my_predictions_html(email, today_only="today" in t)
+    if "all" in t or "every" in t:
+        codes = list(LEAGUES.values())
+    else:
+        codes = [league_code]
+    return results_html(codes)
+
 def prob_bars(home, away, probs):
     """The estimated chances at the bottom of a prediction, in the current language."""
     L = LABELS[st.session_state.get("lang", "en")]
@@ -1146,6 +1252,11 @@ def ask(text_in, label, league_code, attachment=None):
     # Follow the language of the message just sent
     st.session_state.lang = detect_lang(text_in)
     L = LABELS[st.session_state.lang]
+
+    # Results and my-predictions questions are answered from data, free, before the credit check
+    if results_intent(text_in):
+        add_message("table", results_block(text_in, email, league_code))
+        return
 
     # Tables and fixtures come straight from the football data (free, no model call).
     if not needs_credit(text_in):
