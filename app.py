@@ -9,6 +9,7 @@ import hmac
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 import requests
 import streamlit as st
 from google import genai
@@ -81,18 +82,8 @@ GENERAL_KEYWORDS = [
     "history", "head to head", "standings",
 ]
 
-TERMS = """
-**Welcome to Matchday Prediction.** Before you start, please read and accept these terms.
-
-1. **What the app is:** An information and analysis tool for football fans. It shows fixtures and tables and gives estimated probabilities for discussion.
-2. **Not betting advice:** Estimates are not guarantees and are not betting tips. We do not advise on bets.
-3. **Age:** You must be 18 or older. You will be asked to confirm your age. This is based on your own answer.
-4. **Your information:** To save your conversations, we store your email address, a scrambled form of your passcode, and the messages you send and receive. You can delete your chats at any time from the sidebar. Do not send personal or sensitive information in your messages.
-5. **Prediction credits:** Predictions use credits. Credits are bought with an access code after payment is confirmed. Each code gives a fixed number of credits, can be used once, and is not refundable after it is redeemed. Each credit is worth a fixed amount shown in your account. Credits are a prepaid service, not a deposit, and cannot be withdrawn as cash. Codes are personal and must not be shared.
-6. **Referrals:** You may share your referral code. A friend who signs up with it and buys their first pack gives you free credits. Referral credits have no cash value.
-7. **Accuracy:** Data comes from third-party sources and may be delayed or incomplete. We are not liable for decisions made from the app.
-8. **Changes:** We may update these terms. Continued use means you accept the current version.
-"""
+# Terms are kept in terms.md, next to app.py, so they are easy to update and review
+TERMS = (Path(__file__).parent / "terms.md").read_text(encoding="utf-8")
 
 st.set_page_config(page_title=APP_NAME, page_icon="⚽", layout="centered")
 
@@ -544,6 +535,23 @@ st.sidebar.caption(
     f"with it buys their first pack."
 )
 st.sidebar.caption("Credits stay on your account when you delete chats.")
+
+# ---------- About (business identity, for transparency) ----------
+with st.sidebar.expander("ℹ️ About this app"):
+    st.markdown(f"""
+**{APP_NAME}** is an information and analysis tool for football fans.
+
+- **Operator:** Matchday analysis
+- **Registration:** BN/2026/123123
+- **Contact:** +254 797 652122
+- **Address:** Miharati, Nyandarua, Kenya
+
+**Data source:** fixtures, tables and results come from football-data.org. Data can be delayed or incomplete.
+
+**Accuracy:** predictions are estimates, not guarantees. Track-record figures appear only after enough predictions are checked, and they are early until then.
+
+**Refunds:** Prediction credits are non-refundable once purchased, as stated in the terms. This does not affect any rights you have under Kenyan consumer law.
+""")
 
 st.markdown('<p class="disclaimer">Probabilities are estimates for discussion, not guarantees or betting advice.</p>',
             unsafe_allow_html=True)
