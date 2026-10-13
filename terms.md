@@ -1,13 +1,12 @@
 # Terms of Use: Matchday Prediction
 
-**Last updated:** [DATE]
+**Last updated:** 13/10/2026
 
 ## 1. Who we are
 
-Matchday Prediction ("the App", "we", "us") is operated by **Matchday analysis**, registered in Kenya under registration number **BN/2026/123123**, with its address at **Miharati, Nyandarua, Kenya**.
+Matchday Prediction ("the App", "we", "us") is operated by **Matchday analysis**, registered in Kenya under registration number **BN/2026/123123**, with its address at ** Nairobi, Kenya**.
 
-Contact for support: **+254 797 652122** or **[SUPPORT EMAIL]**.
-Contact for privacy requests: **[PRIVACY EMAIL]**.
+Contact for support: **+254 747777769** 
 
 ## 2. What the App is
 
