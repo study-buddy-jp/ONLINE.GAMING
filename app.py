@@ -148,6 +148,26 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 .dtable td.name { text-align: left; font-weight: 600; }
 .dtable tr:nth-child(even) td { background: #F8FBFF; }
 
+.tcard {
+    background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 14px;
+    padding: 12px 14px; margin: 8px 0; box-shadow: 0 2px 6px rgba(29,78,216,0.06);
+}
+.tcard-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tcard-name { color: #1E3A8A; font-weight: 700; font-size: 1rem; }
+.tcard-badge { background: #DBEAFE; color: #1E3A8A; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.tcard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 8px; font-size: 0.82rem; color: #334155; }
+.tcard-grid b { color: #1E3A8A; }
+.tcard-form { margin-top: 8px; font-size: 0.82rem; color: #334155; }
+.tcard-form span { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 6px; color: #FFFFFF; font-weight: 700; font-size: 0.72rem; margin-right: 3px; }
+.f-w { background: #16A34A; } .f-d { background: #94A3B8; } .f-l { background: #DC2626; }
+.pbox { background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 14px; padding: 12px 14px; margin: 8px 0; }
+.pbox-title { color: #1E3A8A; font-weight: 700; margin-bottom: 6px; }
+.pbar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 0.84rem; color: #1E3A8A; }
+.pbar-row span { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbar { flex: 1; background: #DBEAFE; border-radius: 999px; height: 10px; overflow: hidden; }
+.pfill { background: #1D4ED8; height: 100%; border-radius: 999px; }
+.pbar-row b { width: 42px; text-align: right; }
+
 .row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
 .row-bot { justify-content: flex-start; }
@@ -763,8 +783,7 @@ def table_context(code, limit=20):
 
 def team_profile(team_id, team_name, league_code):
     """Structured context for one team: form, home/away splits, rest, next fixture.
-    Only uses figures the football data provides. Injuries and suspensions are
-    not available on the free plan, so they are reported as unknown."""
+    Only lines the football data provides are included."""
     lines = [f"{team_name}:"]
 
     games = team_finished(team_id, FOOTBALL_KEY) or []
@@ -813,8 +832,6 @@ def team_profile(team_id, team_name, league_code):
         last_date = scored_games[0].get("utcDate")
         if last_date:
             lines.append(f"  Days since last match: {days_between(last_date)}")
-    else:
-        lines.append("  Recent results: unavailable.")
 
     nxt = team_scheduled(team_id, FOOTBALL_KEY) or []
     if nxt:
@@ -822,7 +839,6 @@ def team_profile(team_id, team_name, league_code):
         venue = "home" if m["homeTeam"]["id"] == team_id else "away"
         opp = m["awayTeam"]["name"] if venue == "home" else m["homeTeam"]["name"]
         lines.append(f"  Next match: {fmt_kickoff(m['utcDate'])} EAT, {venue} vs {opp}")
-    lines.append("  Injuries and suspensions: unknown (not in the data source).")
     return "\n".join(lines)
 
 def head_to_head(home_id, away_id, home_name, away_name):
@@ -838,7 +854,7 @@ def head_to_head(home_id, away_id, home_name, away_name):
             )
     meet = meet[:H2H_N]
     if not meet:
-        return f"Head-to-head ({home_name} vs {away_name}): no recent meetings found in the data."
+        return ""
     return f"Head-to-head ({home_name} vs {away_name}), most recent first:\n  " + "\n  ".join(meet)
 
 def match_context(code):
@@ -856,11 +872,12 @@ def prediction_context(code, home_name, away_name):
     a = next((t for n, t in by_name.items() if away_name.lower() in n), None)
     if not h or not a:
         return "Could not match both teams in this league's table."
-    return "\n\n".join([
+    parts = [
         team_profile(h["id"], h["name"], code),
         team_profile(a["id"], a["name"], code),
         head_to_head(h["id"], a["id"], h["name"], a["name"]),
-    ])
+    ]
+    return "\n\n".join(p for p in parts if p)
 
 def find_teams_in_question(code, text):
     """Return (home, away) names if the question names two teams in this league."""
@@ -943,11 +960,10 @@ def resolve_predictions():
 # ---------- Chat setup ----------
 SYSTEM_PROMPT = (
     "You are Matchday Prediction, a football match analyst for fans of top European leagues. "
-    "Use only the data provided in each message: fixtures, table, team profiles, and "
-    "head-to-head records. Quote the figures you rely on. If a figure is missing, or the "
-    "data says injuries or suspensions are unknown, say so instead of guessing, and do not "
-    "assume any player is fit or injured. When asked about a match, cover recent form, "
-    "league position, home and away record, rest since the last match, and head-to-head. "
+    "Use only the data provided in each message. Quote the figures you rely on. "
+    "Never mention missing, unavailable or unknown data, and never say what you do not know. "
+    "Simply leave out anything the data does not cover, and talk only about what is there. "
+    "Never assume any player is fit or injured. "
     "Give home win, draw, and away win probabilities that add up to 100%, label them as "
     "estimates, and give 3 short reasons that cite the data. Never present a prediction as "
     "certain, never give betting tips, and never encourage betting. If asked about betting, "
@@ -959,7 +975,7 @@ def gemini_history(msgs):
     out = []
     for m in msgs[-HISTORY_LIMIT:]:
         if m["role"] not in ("user", "assistant"):
-            continue  # table rows are display-only, never sent to the model
+            continue  # table and card rows are display-only, never sent to the model
         role = "user" if m["role"] == "user" else "model"
         out.append(types.Content(role=role, parts=[types.Part(text=m["text"])]))
     return out
@@ -1016,12 +1032,90 @@ def speak(text):
     except Exception:
         return None
 
+def team_card(team_id, team_name, league_code):
+    """One team's stats as a card. Lines the data does not provide are left out."""
+    games = team_finished(team_id, FOOTBALL_KEY) or []
+    scored = []
+    for g in games:
+        ft = (g.get("score") or {}).get("fullTime") or {}
+        if ft.get("home") is None or ft.get("away") is None:
+            continue
+        if g.get("competition", {}).get("code") != league_code and league_code != "CL":
+            continue
+        scored.append(g)
+    scored = scored[:RECENT_N]
+
+    results, gf, ga = [], 0, 0
+    hw = hd = hl = aw = ad = al = 0
+    for g in scored:
+        ft = g["score"]["fullTime"]
+        is_home = g["homeTeam"]["id"] == team_id
+        mine = ft["home"] if is_home else ft["away"]
+        theirs = ft["away"] if is_home else ft["home"]
+        gf += mine
+        ga += theirs
+        if mine > theirs:
+            res = "W"
+            if is_home: hw += 1
+            else: aw += 1
+        elif mine < theirs:
+            res = "L"
+            if is_home: hl += 1
+            else: al += 1
+        else:
+            res = "D"
+            if is_home: hd += 1
+            else: ad += 1
+        results.append(res)
+
+    n = len(scored)
+    parts = []
+    if n:
+        pts = sum(3 if r == "W" else 1 if r == "D" else 0 for r in results)
+        form_html = "".join(
+            f'<span class="{ {"W": "f-w", "D": "f-d", "L": "f-l"}[r] }">{r}</span>'
+            for r in results[:5]
+        )
+        parts.append(
+            f'<div class="tcard-grid">'
+            f'<div>Last {n}: <b>{pts} pts</b></div>'
+            f'<div>Goals: <b>{gf/n:.2f} for, {ga/n:.2f} against</b> per game</div>'
+            f'<div>Home: <b>{hw}W {hd}D {hl}L</b></div>'
+            f'<div>Away: <b>{aw}W {ad}D {al}L</b></div>'
+            f'<div>Last match: <b>{days_between(scored[0]["utcDate"])} days ago</b></div>'
+            f'</div>'
+            f'<div class="tcard-form">Recent form: {form_html}</div>'
+        )
+
+    nxt = team_scheduled(team_id, FOOTBALL_KEY) or []
+    badge = ""
+    if nxt:
+        m = nxt[0]
+        venue = "home" if m["homeTeam"]["id"] == team_id else "away"
+        opp = m["awayTeam"]["name"] if venue == "home" else m["homeTeam"]["name"]
+        badge = (f'<span class="tcard-badge">Next: {fmt_kickoff(m["utcDate"])} '
+                 f'({venue} vs {html.escape(opp)})</span>')
+
+    head = (f'<div class="tcard-head"><span class="tcard-name">{html.escape(team_name)}</span>'
+            f'{badge}</div>')
+    return f'<div class="tcard">{head}{"".join(parts)}</div>'
+
+def prob_bars(home, away, probs):
+    """The estimated chances, shown as bars at the bottom of a prediction."""
+    rows = [(home, probs[0]), ("Draw", probs[1]), (away, probs[2])]
+    body = "".join(
+        f'<div class="pbar-row"><span>{html.escape(label)}</span>'
+        f'<div class="pbar"><div class="pfill" style="width:{p:.0f}%"></div></div>'
+        f'<b>{p:.0f}%</b></div>'
+        for label, p in rows
+    )
+    return f'<div class="pbox"><div class="pbox-title">Estimated chances</div>{body}</div>'
+
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
 
     # Tables and fixtures come straight from the football data (free, no model call).
-    # Prediction questions are excluded so they still go through the paid path.
     if not needs_credit(text_in):
         kind = table_intent(text_in)
         if kind == "table":
@@ -1031,7 +1125,6 @@ def ask(text_in, label, league_code, attachment=None):
             add_message("table", fixtures_html(league_code))
             return
 
-    # Step 1: decide whether this message costs a credit, before answering
     paid = needs_credit(text_in)
     if paid and not is_owner(email) and get_credits(email) < 1:
         st.session_state.paywall = True
@@ -1043,14 +1136,22 @@ def ask(text_in, label, league_code, attachment=None):
         )
         return
 
-    # Build context: full team profiles when two teams are named, otherwise the table and fixtures
     teams = find_teams_in_question(league_code, text_in) if paid else None
     pair = find_team_rows(league_code, text_in) if paid else None
     if teams:
         context = prediction_context(league_code, teams[0], teams[1])
     else:
         context = match_context(league_code)
-    question = f"{context}\n\nUser question: {text_in}"
+
+    # For a prediction, ask for a fixed short format so the bottom of the answer is clean
+    instruction = ""
+    if paid and pair:
+        instruction = (
+            "\n\nReply only in this format, with no team headers or long paragraphs:\n"
+            "Home win: X%\nDraw: X%\nAway win: X%\n"
+            "Key reasons:\n- reason 1\n- reason 2\n- reason 3"
+        )
+    question = f"{context}\n\nUser question: {text_in}{instruction}"
     content = question
     if attachment is not None:
         part = types.Part.from_bytes(data=attachment.getvalue(), mime_type=attachment.type)
@@ -1071,7 +1172,7 @@ def ask(text_in, label, league_code, attachment=None):
         add_message("assistant", "I couldn't get an analysis just now. Please try again or rephrase your question.")
         return
 
-    # Step 2: guard. If an unpaid answer contains percentages, treat it as a prediction
+    # Guard: an unpaid answer with percentages counts as a prediction
     if not paid and not is_owner(email) and re.search(r"\d+\s*%", text):
         paid = True
         if get_credits(email) < 1:
@@ -1082,20 +1183,26 @@ def ask(text_in, label, league_code, attachment=None):
             )
             return
 
-    # Step 3: charge only after a real answer was produced (owner is never charged)
     if paid and not is_owner(email):
         spend_credit(email)
 
-    # Log every paid prediction, including the owner's, for the track record
+    probs = None
     if paid and pair:
         probs = parse_probs(text)
         if probs:
             log_prediction(email, league_code, pair[0], pair[1], probs)
+        # Team cards first, from the football data
+        add_message("table", team_card(pair[0]["id"], pair[0]["name"], league_code)
+                    + team_card(pair[1]["id"], pair[1]["name"], league_code))
 
     if st.session_state.reply_mode in ("Voice", "Both"):
         with st.spinner("Preparing voice..."):
             st.session_state.pending_voice = speak(text)
+
+    # The model's reasons come next, then the estimated chances at the very bottom
     add_message("assistant", text)
+    if probs:
+        add_message("table", prob_bars(pair[0]["name"], pair[1]["name"], probs))
 
 def transcribe(data):
     try:
