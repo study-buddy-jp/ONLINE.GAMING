@@ -7,6 +7,13 @@ EAT = timezone(timedelta(hours=3))
 def _base(env):
     return "https://api.safaricom.co.ke" if env == "production" else "https://sandbox.safaricom.co.ke"
 
+def normalise_phone(p):
+    """Turn 07..., +254..., or 254... into 254 followed by 9 digits."""
+    p = p.strip().replace(" ", "").replace("+", "")
+    if p.startswith("0"):
+        p = "254" + p[1:]
+    return p
+
 def get_token(env, consumer_key, consumer_secret):
     r = requests.get(
         f"{_base(env)}/oauth/v1/generate?grant_type=client_credentials",
