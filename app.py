@@ -15,6 +15,7 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from supabase import create_client
+from model import predict as model_predict
 
 def get_secret(name, default=""):
     value = os.environ.get(name)
@@ -410,6 +411,14 @@ def add_message(role, text):
             sb.table("conversations").update({"title": text[:40]}) \
                 .eq("id", conv_id).eq("title", NEW_CHAT_TITLE).execute()
 
+def go_home():
+    """Show the start screen. The chat stays saved in Previous chats."""
+    st.session_state.messages = []
+    st.session_state.paywall = False
+    st.session_state.pop("chat", None)
+    st.session_state.conv_id = None
+    save_progress(conv_id=None)
+
 def start_new_chat():
     st.session_state.conv_id = create_conversation(st.session_state.user_email)
     st.session_state.messages = []
@@ -617,6 +626,7 @@ else:
         if not history:
             st.caption("No activity yet.")
 
+st.sidebar.button("🏠 Home", on_click=go_home, use_container_width=True)
 st.sidebar.button("➕ New chat", on_click=start_new_chat, use_container_width=True)
 
 st.sidebar.markdown("**Previous chats**")
@@ -1110,8 +1120,8 @@ SYSTEM_PROMPT = (
     "Never mention missing, unavailable or unknown data, and never say what you do not know. "
     "Simply leave out anything the data does not cover, and talk only about what is there. "
     "Never assume any player is fit or injured. "
-    "Give home win, draw, and away win probabilities that add up to 100%, label them as "
-    "estimates, and give 3 short reasons that cite the data. Never present a prediction as "
+    "When model figures are provided, use exactly the percentages given and do not change them. "
+    "Give three short reasons that cite the figures. Never present a prediction as "
     "certain, never give betting tips, and never encourage betting. If asked about betting, "
     "briefly explain that you analyse matches but do not advise on bets. If the user attaches "
     "a screenshot or PDF, read it carefully and use it. Keep replies concise and clear."
@@ -1276,6 +1286,11 @@ LABELS = {
            "pending": "⏳ Inasubiri matokeo", "summary": "Muhtasari"},
 }
 
+NO_HISTORY = {
+    "en": "There is not enough finished match history for these two teams in this league yet, so no prediction was made and no credit was used.",
+    "sw": "Hakuna historia ya kutosha ya mechi kwa timu hizi mbili kwenye ligi hii bado, kwa hiyo hakuna utabiri na salio halijatumika.",
+}
+
 RESULT_WORDS = ["result", "score", "outcome", "finished", "full time",
                 "accuracy", "record", "percentage", "how many"]
 MINE_WORDS = [
@@ -1370,6 +1385,21 @@ def prob_bars(home, away, probs):
     )
     return f'<div class="pbox"><div class="pbox-title">{L["chances"]}</div>{body}</div>'
 
+def model_figures(code, home, away):
+    """Elo and Poisson figures for a match, from the league's finished matches."""
+    matches = sorted(finished_matches(code, FOOTBALL_KEY), key=lambda m: m["utcDate"])
+    return model_predict(matches, home["id"], away["id"])
+
+def figures_block(f):
+    """The model's figures as plain text for Gemini to explain."""
+    return (
+        f"Model figures for {f['home']} (home) vs {f['away']} (away):\n"
+        f"Elo rating: {f['home']} {f['home_elo']}, {f['away']} {f['away_elo']}\n"
+        f"Elo-based home win chance: {f['elo_home_pct']}%\n"
+        f"Expected goals: {f['home']} {f['home_xg']}, {f['away']} {f['away_xg']}\n"
+        f"Poisson probabilities: home win {f['p_home']}%, draw {f['p_draw']}%, away win {f['p_away']}%"
+    )
+
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
@@ -1378,12 +1408,12 @@ def ask(text_in, label, league_code, attachment=None):
     st.session_state.lang = detect_lang(text_in)
     L = LABELS[st.session_state.lang]
 
-    # Results, records and my-predictions questions are answered from data, free, before the credit check
+    # Results, records and my-predictions questions are answered from data, free
     if results_intent(text_in):
         add_message("table", results_block(text_in, email, league_code))
         return
 
-    # Tables and fixtures come straight from the football data (free, no model call).
+    # Tables and fixtures come straight from the football data (free, no model call)
     if not needs_credit(text_in):
         kind = table_intent(text_in)
         if kind == "table":
@@ -1394,26 +1424,34 @@ def ask(text_in, label, league_code, attachment=None):
             return
 
     paid = needs_credit(text_in)
+    pair = find_team_rows(league_code, text_in) if paid else None
+
+    # Run the model before charging, so no credit is spent on a match it cannot cover
+    figs = None
+    if paid and pair:
+        figs = model_figures(league_code, pair[0], pair[1])
+        if figs is None:
+            add_message("assistant", NO_HISTORY[st.session_state.lang])
+            return
+
     if paid and not is_owner(email) and get_credits(email) < 1:
         st.session_state.paywall = True
         add_message("assistant", L["paywall"])
         return
 
-    teams = find_teams_in_question(league_code, text_in) if paid else None
-    pair = find_team_rows(league_code, text_in) if paid else None
-    if teams:
-        context = prediction_context(league_code, teams[0], teams[1])
+    if figs:
+        context = (figures_block(figs) + "\n\n"
+                   + prediction_context(league_code, figs["home"], figs["away"]))
+        instruction = (
+            f"\n\nUse exactly these percentages: Home win {figs['p_home']}%, "
+            f"Draw {figs['p_draw']}%, Away win {figs['p_away']}%. Do not change them. "
+            "Then give three short reasons that cite the figures above."
+        )
     else:
         context = match_context(league_code)
+        instruction = ""
+    instruction = f"\n\nReply in {L['reply_in']}." + instruction
 
-    # Language and format instructions, added to each message so the reply language follows the user
-    instruction = f"\n\nReply in {L['reply_in']}."
-    if paid and pair:
-        instruction += (
-            "\nReply only in this format, with no team headers or long paragraphs:\n"
-            "Home win: X%\nDraw: X%\nAway win: X%\n"
-            "Key reasons:\n- reason 1\n- reason 2\n- reason 3"
-        )
     question = f"{context}\n\nUser question: {text_in}{instruction}"
     content = question
     if attachment is not None:
@@ -1447,11 +1485,9 @@ def ask(text_in, label, league_code, attachment=None):
         spend_credit(email)
 
     probs = None
-    if paid and pair:
-        probs = parse_probs(text)
-        if probs:
-            log_prediction(email, league_code, pair[0], pair[1], probs)
-        # Team cards first, from the football data
+    if paid and figs:
+        probs = (figs["p_home"], figs["p_draw"], figs["p_away"])
+        log_prediction(email, league_code, pair[0], pair[1], probs)
         add_message("table", team_card(pair[0]["id"], pair[0]["name"], league_code)
                     + team_card(pair[1]["id"], pair[1]["name"], league_code))
 
@@ -1459,10 +1495,10 @@ def ask(text_in, label, league_code, attachment=None):
         with st.spinner("Preparing voice..."):
             st.session_state.pending_voice = speak(text)
 
-    # The model's reasons come next, then the estimated chances at the very bottom
+    # Reasons first, then the model's estimated chances at the bottom
     add_message("assistant", text)
     if probs:
-        add_message("table", prob_bars(pair[0]["name"], pair[1]["name"], probs))
+        add_message("table", prob_bars(figs["home"], figs["away"], probs))
 
 def transcribe(data):
     try:
