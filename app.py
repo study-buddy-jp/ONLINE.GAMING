@@ -44,9 +44,9 @@ APP_TITLE = f"⚽ {APP_NAME}"
 APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
 APP_ROLE_TAG = "Match Analyst"
 HISTORY_LIMIT = 20
-PACK_SIZE = 5             # prediction credits per access code
-CREDIT_KSH = 20           # shillings per prediction credit (PAY_PRICE should equal PACK_SIZE * CREDIT_KSH)
-REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is redeemed
+PACK_SIZE = 5             # prediction credits per pack
+CREDIT_KSH = 20           # shillings per prediction credit (pack price = PACK_SIZE * CREDIT_KSH)
+REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is paid
 MIN_AGE = 18
 NEW_CHAT_TITLE = "New chat"
 EAT = timezone(timedelta(hours=3))  # Nairobi time
@@ -170,6 +170,15 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 .pbar { flex: 1; background: #DBEAFE; border-radius: 999px; height: 10px; overflow: hidden; }
 .pfill { background: #1D4ED8; height: 100%; border-radius: 999px; }
 .pbar-row b { width: 42px; text-align: right; }
+
+.paycard {
+    background: linear-gradient(135deg, #FFFBEB 0%, #FEF3C7 100%);
+    border: 2px solid #F59E0B; border-radius: 18px;
+    padding: 16px 18px; margin: 12px 0; box-shadow: 0 6px 18px rgba(245,158,11,0.25);
+}
+.paycard-title { color: #78350F; font-weight: 800; font-size: 1.1rem; margin: 0 0 4px 0; }
+.paycard-price { color: #92400E; font-size: 1.6rem; font-weight: 800; margin: 2px 0 6px 0; }
+.paycard-text { color: #78350F; font-size: 0.88rem; line-height: 1.45; margin: 0; }
 
 .row { display: flex; align-items: flex-end; gap: 8px; margin: 6px 0; }
 .row-user { justify-content: flex-end; }
@@ -521,7 +530,7 @@ def get_my_ref_code(email):
     return code
 
 def reward_referrer(email):
-    """Called after a referred friend's first paid redemption. Rewards only once."""
+    """Called after a referred friend's first paid pack. Rewards only once."""
     rows = (sb.table("referrals").select("referrer")
             .eq("referee", email).eq("rewarded", False).execute().data)
     if not rows:
@@ -533,22 +542,6 @@ def reward_referrer(email):
         "credits": get_credits(referrer) + REFERRAL_CREDITS,
     }).execute()
     ledger_add(referrer, "referral", REFERRAL_CREDITS, "Friend's first pack")
-
-def redeem_code(email, code):
-    code = code.strip()
-    if code not in CODES:
-        return False, "That code is not valid. Check it and try again."
-    if sb.table("redemptions").select("code").eq("code", code).execute().data:
-        return False, "That code has already been used."
-    try:
-        # The primary key on code makes this insert fail if two people redeem at once
-        sb.table("redemptions").insert({"code": code, "email": email, "created": now_iso()}).execute()
-    except Exception:
-        return False, "That code has already been used."
-    sb.table("wallet").upsert({"email": email, "credits": get_credits(email) + PACK_SIZE}).execute()
-    ledger_add(email, "top_up", PACK_SIZE, "Access code pack")
-    reward_referrer(email)
-    return True, f"{PACK_SIZE} prediction credits added (KSh {PACK_SIZE * CREDIT_KSH})."
 
 # ---------- Step 1: terms ----------
 if not st.session_state.accepted_terms:
@@ -717,13 +710,7 @@ if not key:
     st.stop()
 
 CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
-PAY_LINK = get_secret("PAY_LINK")
 FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
-
-# Payment details (set in Streamlit secrets, never in code)
-PAY_PRICE = get_secret("PAY_PRICE", "100")
-PAYBILL_NUMBER = get_secret("PAYBILL_NUMBER", "not set")
-ACCOUNT_NUMBER = get_secret("ACCOUNT_NUMBER", "not set")
 
 @st.cache_resource
 def get_client():
@@ -1676,41 +1663,24 @@ if st.session_state.messages:
             st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
             st.session_state.pending_voice = None
 
-# ---------- Paywall: M-Pesa STK push, access code fallback ----------
+# ---------- Paywall: M-Pesa STK push only ----------
 if st.session_state.paywall:
     amount = PACK_SIZE * CREDIT_KSH
-    st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {amount}.")
-
+    st.markdown(
+        f'<div class="paycard">'
+        f'<p class="paycard-title">🔓 Unlock more predictions</p>'
+        f'<p class="paycard-price">KSh {amount}</p>'
+        f'<p class="paycard-text">{PACK_SIZE} prediction credits. Enter your M-Pesa number, '
+        f'then enter your PIN on the prompt that appears on your phone.</p>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     with st.form("stk_pay"):
         pay_phone = st.text_input("Your M-Pesa number (07... or 2547...)")
-        pay_go = st.form_submit_button(f"Pay KSh {amount} with M-Pesa")
+        pay_go = st.form_submit_button(f"💳 Pay KSh {amount} with M-Pesa", use_container_width=True)
     if pay_go:
         ok, msg = start_mpesa_payment(st.session_state.user_email, pay_phone)
         (st.success if ok else st.error)(msg)
-
-    st.caption("Having trouble? Pay the paybill manually below and enter your access code.")
-    st.markdown(
-        f"**Pay with M-Pesa manually**\n\n"
-        f"1. Go to **Lipa na M-Pesa → Paybill**\n"
-        f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
-        f"3. Account number: **{ACCOUNT_NUMBER}**\n"
-        f"4. Amount: **KSh {PAY_PRICE}**\n"
-        f"5. Enter your PIN, then fill in the form with your M-Pesa code."
-    )
-
-    if PAY_LINK:
-        st.link_button("Open payment form", PAY_LINK, use_container_width=True)
-
-    with st.form("redeem"):
-        code_in = st.text_input("Enter your access code", type="password")
-        redeem_submit = st.form_submit_button("Add credits")
-    if redeem_submit:
-        ok, msg = redeem_code(st.session_state.user_email, code_in)
-        if ok:
-            st.session_state.paywall = False
-            st.rerun()
-        else:
-            st.error(msg)
 
 # ---------- Owner stats (only visible to ADMIN_EMAIL) ----------
 if is_owner(st.session_state.user_email):
@@ -1721,9 +1691,7 @@ if is_owner(st.session_state.user_email):
         st.metric("Sign-ups", count_events("signup"))
         st.metric("Unique people who signed in", count_unique_signins())
         st.metric("Sign-ins (total)", count_events("signin"))
-        st.metric("Packs sold", packs)
-        st.metric("Credits sold", packs * PACK_SIZE)
-        st.metric("Revenue (KSh)", packs * int(PAY_PRICE))
+        st.metric("Credits sold", count_rows("wallet") and 0)
         st.metric("Referrals rewarded", count_rows("referrals", rewarded=True))
         st.metric("Chats started", count_rows("conversations"))
         ps = prediction_stats()
