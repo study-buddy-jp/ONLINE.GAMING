@@ -203,6 +203,7 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 .stTextInput input { border-radius: 10px; padding: 0.4rem 0.6rem; }
 div[data-testid="stPopover"] button { border-radius: 10px; padding: 0.25rem 0.5rem; }
 .attach-note { color: #1D4ED8; font-size: 0.82rem; font-weight: 600; margin: 0; }
+.terms-small, .terms-small p, .terms-small li { font-size: 0.8rem; line-height: 1.4; color: #334155; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -541,7 +542,7 @@ def redeem_code(email, code):
 
 # ---------- Step 1: terms ----------
 if not st.session_state.accepted_terms:
-    st.markdown(TERMS)
+    st.markdown(f'<div class="terms-small">{TERMS}</div>', unsafe_allow_html=True)
     agree = st.checkbox("I have read and accept the terms.")
     if st.button("Continue", disabled=not agree):
         st.session_state.accepted_terms = True
