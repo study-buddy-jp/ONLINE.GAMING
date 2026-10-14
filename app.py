@@ -16,6 +16,7 @@ from google import genai
 from google.genai import types
 from supabase import create_client
 from model import predict as model_predict
+from mpesa import stk_push, normalise_phone
 
 def get_secret(name, default=""):
     value = os.environ.get(name)
@@ -1400,6 +1401,29 @@ def figures_block(f):
         f"Poisson probabilities: home win {f['p_home']}%, draw {f['p_draw']}%, away win {f['p_away']}%"
     )
 
+def start_mpesa_payment(email, phone):
+    """Send the STK prompt and record it, so the callback knows who to credit."""
+    phone = normalise_phone(phone)
+    amount = PACK_SIZE * CREDIT_KSH
+    status, body = stk_push(
+        get_secret("DARAJA_ENV", "sandbox"),
+        get_secret("DARAJA_CONSUMER_KEY"), get_secret("DARAJA_CONSUMER_SECRET"),
+        get_secret("DARAJA_SHORTCODE"), get_secret("DARAJA_PASSKEY"),
+        get_secret("DARAJA_CALLBACK_URL"),
+        phone, amount, "MATCHDAY",
+    )
+    if status == 200 and body.get("ResponseCode") == "0":
+        sb.table("mpesa_payments").insert({
+            "checkout_request_id": body["CheckoutRequestID"],
+            "email": email,
+            "amount": amount,
+            "status": "pending",
+            "created": now_iso(),
+        }).execute()
+        return True, ("Check your phone and enter your M-Pesa PIN. "
+                      "Credits are added automatically once payment is confirmed.")
+    return False, f"Payment could not start: {body.get('errorMessage', 'unknown error')}"
+
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
@@ -1652,11 +1676,21 @@ if st.session_state.messages:
             st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
             st.session_state.pending_voice = None
 
-# ---------- Paywall: pay to paybill only ----------
+# ---------- Paywall: M-Pesa STK push, access code fallback ----------
 if st.session_state.paywall:
-    st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {PAY_PRICE}.")
+    amount = PACK_SIZE * CREDIT_KSH
+    st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {amount}.")
+
+    with st.form("stk_pay"):
+        pay_phone = st.text_input("Your M-Pesa number (07... or 2547...)")
+        pay_go = st.form_submit_button(f"Pay KSh {amount} with M-Pesa")
+    if pay_go:
+        ok, msg = start_mpesa_payment(st.session_state.user_email, pay_phone)
+        (st.success if ok else st.error)(msg)
+
+    st.caption("Having trouble? Pay the paybill manually below and enter your access code.")
     st.markdown(
-        f"**Pay with M-Pesa**\n\n"
+        f"**Pay with M-Pesa manually**\n\n"
         f"1. Go to **Lipa na M-Pesa → Paybill**\n"
         f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
         f"3. Account number: **{ACCOUNT_NUMBER}**\n"
@@ -1698,23 +1732,3 @@ if is_owner(st.session_state.user_email):
         st.metric("Correct", ps["correct"])
         st.metric("Wrong", ps["wrong"])
         st.metric("Awaiting result", ps["pending"])
-
-# ---------- Owner-only M-Pesa test (sandbox) ----------
-if is_owner(st.session_state.user_email):
-    with st.sidebar.expander("🧪 M-Pesa test"):
-        from mpesa import stk_push, normalise_phone
-        t_phone = st.text_input("Test phone (2547XXXXXXXX)", key="t_phone")
-        if st.button("Send test STK push", key="t_send"):
-            status, body = stk_push(
-                get_secret("DARAJA_ENV", "sandbox"),
-                get_secret("DARAJA_CONSUMER_KEY"),
-                get_secret("DARAJA_CONSUMER_SECRET"),
-                get_secret("DARAJA_SHORTCODE"),
-                get_secret("DARAJA_PASSKEY"),
-                get_secret("DARAJA_CALLBACK_URL"),
-                normalise_phone(t_phone),
-                1,
-                "TEST",
-            )
-            st.write(f"HTTP {status}")
-            st.json(body)
