@@ -132,9 +132,4 @@ We may update these terms. We will show the current version in the App. Continue
 
 ## 18. Governing law and disputes
 
-These terms are governed by the laws of Kenya. If you have a complaint, contact us first and we will try to resolve it within **[14] days**. If that fails, disputes go to the courts of Kenya. This does not limit your right to complain to a regulator or consumer body.
-
-## 19. Contact
-
-For support, refunds and general questions: **[SUPPORT EMAIL]** or **+254 797 652122**.
-For privacy requests: **[PRIVACY EMAIL]**.
+These terms are governed by the laws of Kenya. If you have a complaint, contact us first and we will try to resolve it within **[14] days**. If that fails, disputes go to the courts of Kenya. This does not limit your right to complain to a regulator or consumer bo
