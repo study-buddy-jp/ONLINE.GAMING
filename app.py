@@ -1698,3 +1698,23 @@ if is_owner(st.session_state.user_email):
         st.metric("Correct", ps["correct"])
         st.metric("Wrong", ps["wrong"])
         st.metric("Awaiting result", ps["pending"])
+
+# ---------- Owner-only M-Pesa test (sandbox) ----------
+if is_owner(st.session_state.user_email):
+    with st.sidebar.expander("🧪 M-Pesa test"):
+        from mpesa import stk_push, normalise_phone
+        t_phone = st.text_input("Test phone (2547XXXXXXXX)", key="t_phone")
+        if st.button("Send test STK push", key="t_send"):
+            status, body = stk_push(
+                get_secret("DARAJA_ENV", "sandbox"),
+                get_secret("DARAJA_CONSUMER_KEY"),
+                get_secret("DARAJA_CONSUMER_SECRET"),
+                get_secret("DARAJA_SHORTCODE"),
+                get_secret("DARAJA_PASSKEY"),
+                get_secret("DARAJA_CALLBACK_URL"),
+                normalise_phone(t_phone),
+                1,
+                "TEST",
+            )
+            st.write(f"HTTP {status}")
+            st.json(body)
