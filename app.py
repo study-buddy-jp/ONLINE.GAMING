@@ -224,6 +224,8 @@ st.session_state.setdefault("att_n", 0)
 st.session_state.setdefault("visit_logged", False)
 st.session_state.setdefault("resolved", False)
 st.session_state.setdefault("lang", "en")
+st.session_state.setdefault("restored", False)
+st.session_state.setdefault("token", None)
 
 # ---------- Header ----------
 st.markdown(f"""
@@ -412,18 +414,67 @@ def start_new_chat():
     st.session_state.messages = []
     st.session_state.paywall = False
     st.session_state.pop("chat", None)
+    save_progress(conv_id=st.session_state.conv_id)
 
 def open_chat(conv_id):
     st.session_state.conv_id = conv_id
     st.session_state.messages = load_conv_messages(conv_id)
     st.session_state.paywall = False
     st.session_state.pop("chat", None)
+    save_progress(conv_id=conv_id)
 
 def delete_all_chats():
     email = st.session_state.user_email
     sb.table("chat_messages").delete().eq("email", email).execute()
     sb.table("conversations").delete().eq("email", email).execute()
     start_new_chat()
+
+# ----- Session persistence (survives browser refresh) -----
+def ensure_token():
+    """Create a session row once per browser visit and keep its token in the page link."""
+    tok = st.session_state.get("token")
+    if not tok:
+        tok = secrets.token_urlsafe(24)
+        sb.table("sessions").insert({
+            "token": tok,
+            "email": st.session_state.get("user_email"),
+            "terms_ok": bool(st.session_state.get("accepted_terms", False)),
+            "age_ok": bool(st.session_state.get("age_ok", False)),
+            "conv_id": st.session_state.get("conv_id"),
+            "created": now_iso(),
+        }).execute()
+        st.session_state.token = tok
+        st.query_params["s"] = tok
+    return tok
+
+def save_progress(**fields):
+    """Save progress (terms, age, email, chat) so a refresh brings the user back to the same place."""
+    tok = ensure_token()
+    sb.table("sessions").update(fields).eq("token", tok).execute()
+
+def end_session():
+    tok = st.session_state.get("token")
+    if tok:
+        sb.table("sessions").delete().eq("token", tok).execute()
+    st.session_state.token = None
+    if "s" in st.query_params:
+        del st.query_params["s"]
+
+# Restore a previous visit from the page link, once per browser load
+if not st.session_state.restored:
+    st.session_state.restored = True
+    tok = st.query_params.get("s")
+    if tok:
+        rows = sb.table("sessions").select("*").eq("token", tok).execute().data
+        if rows:
+            row = rows[0]
+            st.session_state.token = tok
+            st.session_state.accepted_terms = bool(row["terms_ok"])
+            st.session_state.age_ok = bool(row["age_ok"])
+            st.session_state.user_email = row["email"]
+            st.session_state.conv_id = row["conv_id"]
+            if row["conv_id"]:
+                st.session_state.messages = load_conv_messages(row["conv_id"])
 
 # ----- Credits and account ledger -----
 def get_credits(email):
@@ -494,6 +545,7 @@ if not st.session_state.accepted_terms:
     agree = st.checkbox("I have read and accept the terms.")
     if st.button("Continue", disabled=not agree):
         st.session_state.accepted_terms = True
+        save_progress(terms_ok=True)
         st.rerun()
     st.stop()
 
@@ -516,6 +568,7 @@ if not st.session_state.age_ok:
             st.rerun()
         else:
             st.session_state.age_ok = True
+            save_progress(age_ok=True)
             st.rerun()
     st.stop()
 
@@ -538,6 +591,7 @@ if not st.session_state.user_email:
             st.session_state.messages = []
             st.session_state.paywall = False
             st.session_state.pop("chat", None)
+            save_progress(email=result, conv_id=st.session_state.conv_id)
             st.rerun()
         else:
             st.error(result)
@@ -580,10 +634,13 @@ if st.sidebar.button("🗑️ Delete all my chats"):
     st.rerun()
 
 if st.sidebar.button("Sign out"):
+    end_session()
     st.session_state.user_email = None
     st.session_state.conv_id = None
     st.session_state.messages = []
     st.session_state.paywall = False
+    st.session_state.accepted_terms = False
+    st.session_state.age_ok = False
     st.session_state.pop("chat", None)
     st.rerun()
 
@@ -1040,6 +1097,11 @@ def resolve_predictions():
             }).eq("id", pid).execute()
             break
 
+# Check predictions against finished results once per session
+if not st.session_state.resolved:
+    resolve_predictions()
+    st.session_state.resolved = True
+
 # ---------- Chat setup ----------
 SYSTEM_PROMPT = (
     "You are Matchday Prediction, a football match analyst for fans of top European leagues. "
@@ -1201,12 +1263,16 @@ LABELS = {
                        "Pay below to add more. General questions about fixtures, form, "
                        "and the table are still free."),
            "was_prediction": "That was a prediction, which uses prediction credits. Pay below to add more.",
-           "failed": "I couldn't get an analysis just now. Please try again or rephrase your question."},
+           "failed": "I couldn't get an analysis just now. Please try again or rephrase your question.",
+           "correct": "✔ Correct predictions", "wrong": "✘ Wrong predictions",
+           "pending": "⏳ Awaiting result", "summary": "Summary"},
     "sw": {"chances": "Uwezekano unaokadiriwa", "draw": "Sare", "reply_in": "Swahili",
            "paywall": ("Utabiri na makadirio ya uwezekano hutumia salio la utabiri, nawe huna salio. "
                        "Lipa hapa chini ili kuongeza. Maswali ya ratiba, msimamo na fomu bado ni bure."),
            "was_prediction": "Hilo lilikuwa utabiri, unaotumia salio la utabiri. Lipa hapa chini ili kuongeza.",
-           "failed": "Sikuweza kupata uchambuzi sasa hivi. Tafadhali jaribu tena au uulize kwa njia nyingine."},
+           "failed": "Sikuweza kupata uchambuzi sasa hivi. Tafadhali jaribu tena au uulize kwa njia nyingine.",
+           "correct": "✔ Utabiri sahihi", "wrong": "✘ Utabiri usio sahihi",
+           "pending": "⏳ Inasubiri matokeo", "summary": "Muhtasari"},
 }
 
 RESULT_WORDS = ["result", "score", "outcome", "finished", "full time",
@@ -1237,33 +1303,45 @@ def my_predictions_html(email, today_only=False):
     if not rows:
         return "<p>No predictions to show for this period.</p>"
 
-    played = [r for r in rows if r["outcome"] is not None]
-    summary = ""
-    if played:
-        right = sum(1 for r in played if r["correct"])
-        summary = f"<p>Most likely outcome correct in {right} of {len(played)} played matches.</p>"
-
-    body = []
-    for r in rows:
+    def cells(r):
         probs = {"H": r["p_home"], "D": r["p_draw"], "A": r["p_away"]}
         names = {"H": r["home"], "D": L["draw"], "A": r["away"]}
         pick = max(probs, key=probs.get)
-        if r["outcome"] is None:
-            res, mark = "Not played yet", "-"
-        else:
-            res = names[r["outcome"]]
-            mark = "✔" if r["correct"] else "✘"
         when = datetime.fromisoformat(r["created"]).astimezone(EAT).strftime("%d %b")
-        body.append(
-            "<tr>"
+        res = "-" if r["outcome"] is None else names[r["outcome"]]
+        return (
             f"<td>{when}</td>"
             f"<td class='name'>{html.escape(r['home'])} vs {html.escape(r['away'])}</td>"
             f"<td>{html.escape(names[pick])} ({probs[pick]:.0f}%)</td>"
             f"<td>{html.escape(res)}</td>"
-            f"<td><b>{mark}</b></td>"
-            "</tr>"
         )
-    return summary + dtable(["Made", "Match", "Most likely", "Result", ""], body)
+
+    correct = [r for r in rows if r["outcome"] is not None and r["correct"]]
+    wrong = [r for r in rows if r["outcome"] is not None and not r["correct"]]
+    pending = [r for r in rows if r["outcome"] is None]
+    played = len(correct) + len(wrong)
+    cpct = f"{len(correct) / played * 100:.1f}%" if played else "-"
+    wpct = f"{len(wrong) / played * 100:.1f}%" if played else "-"
+
+    out = (
+        f'<div class="pbox"><div class="pbox-title">{L["summary"]}</div>'
+        f"<div>Checked: <b>{played}</b></div>"
+        f"<div>Correct: <b>{len(correct)} of {played} ({cpct})</b></div>"
+        f"<div>Wrong: <b>{len(wrong)} of {played} ({wpct})</b></div>"
+        f"<div>Awaiting result: <b>{len(pending)}</b></div>"
+        "</div>"
+    )
+    headers = ["Made", "Match", "Most likely", "Result"]
+    if correct:
+        out += f'<div class="quick-title">{L["correct"]}</div>'
+        out += dtable(headers, [f"<tr>{cells(r)}</tr>" for r in correct])
+    if wrong:
+        out += f'<div class="quick-title">{L["wrong"]}</div>'
+        out += dtable(headers, [f"<tr>{cells(r)}</tr>" for r in wrong])
+    if pending:
+        out += f'<div class="quick-title">{L["pending"]}</div>'
+        out += dtable(headers, [f"<tr>{cells(r)}</tr>" for r in pending])
+    return out
 
 def results_block(text_in, email, league_code):
     """Answer a results, record, or my-predictions question. Free: no model call, no credit."""
@@ -1451,11 +1529,6 @@ with c_mode:
     st.radio("Reply", REPLY_MODES, key="reply_mode", horizontal=True)
 
 league_code = LEAGUES[st.session_state.league]
-
-# Check predictions against finished results once per session
-if not st.session_state.resolved:
-    resolve_predictions()
-    st.session_state.resolved = True
 
 # ---------- Start screen (empty chat) or chat box (has messages) ----------
 if st.session_state.messages:
