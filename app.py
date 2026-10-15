@@ -89,7 +89,7 @@ NAME = st.session_state.name
 # ---------- Database helpers ----------
 def ensure_account(email, name):
     sb = db()
-    sb.table("users").upsert({"email": email, "name": name}, on_conflict="email").execute()
+    sb.table("users").upsert({"email": email}, on_conflict="email").execute()
     sb.table("wallet").upsert(
         {"email": email, "credits": 0}, on_conflict="email", ignore_duplicates=True
     ).execute()
