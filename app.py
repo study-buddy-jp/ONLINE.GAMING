@@ -158,6 +158,18 @@ def redeem_code(code):
     st.success(f"Added {PACK_CREDITS} credits.")
 
 
+def paywall_forms(suffix):
+    """Payment and access-code forms. Use a different suffix for each place on the page."""
+    with st.form(f"buy_pack_{suffix}"):
+        phone = st.text_input("M-Pesa phone number", placeholder="0712345678", key=f"phone_{suffix}")
+        if st.form_submit_button(f"Pay KSh {PACK_PRICE_KES} for {PACK_CREDITS} credits"):
+            start_payment(phone)
+    with st.form(f"redeem_{suffix}"):
+        code_in = st.text_input("Or enter an access code", key=f"code_{suffix}")
+        if st.form_submit_button("Redeem code"):
+            redeem_code(code_in.strip())
+
+
 # ---------- Football data helpers ----------
 @st.cache_data(ttl=600, show_spinner=False)
 def load_matches(code):
@@ -229,7 +241,7 @@ def run_prediction(text, code):
         st.warning("I could not find both teams in this league.")
         return
     if get_balance(EMAIL) < PREDICTION_COST:
-        st.error("You need credits to predict. Buy a pack or redeem an access code.")
+        st.warning("You are out of credits. Buy a pack or enter an access code below.")
         return
     finished = [x for x in matches if x.get("status") == "FINISHED"]
     figures = model_predict(finished, home["id"], away["id"])
@@ -268,17 +280,9 @@ with st.sidebar:
     st.metric("Credits", balance)
     st.caption(f"1 prediction = {PREDICTION_COST} credit")
 
-    st.subheader(f"Buy {PACK_CREDITS} credits")
-    st.caption(f"KSh {PACK_PRICE_KES} via M-Pesa")
-    with st.form("buy_pack"):
-        phone = st.text_input("M-Pesa phone number", placeholder="0712345678")
-        if st.form_submit_button(f"Pay KSh {PACK_PRICE_KES}"):
-            start_payment(phone)
-
-    with st.form("redeem"):
-        code = st.text_input("Access code")
-        if st.form_submit_button("Redeem"):
-            redeem_code(code.strip())
+    st.subheader("Buy credits")
+    st.caption(f"{PACK_CREDITS} credits for KSh {PACK_PRICE_KES}")
+    paywall_forms("side")
 
     with st.expander("Terms"):
         if TERMS_FILE.exists():
@@ -300,12 +304,27 @@ code = COMPETITIONS[league]
 tab_predict, tab_fixtures, tab_table = st.tabs(["Predict", "Fixtures", "Table"])
 
 with tab_predict:
-    st.write("Type a match, for example **Arsenal vs Chelsea**. Each prediction uses 1 credit.")
-    with st.form("predict_form"):
-        match_text = st.text_input("Match", placeholder="Arsenal vs Chelsea")
-        submitted = st.form_submit_button("Predict", type="primary")
-    if submitted:
-        run_prediction(match_text, code)
+    try:
+        current_balance = get_balance(EMAIL)
+    except Exception:
+        current_balance = 0
+
+    if current_balance < PREDICTION_COST:
+        st.warning(
+            f"You have {current_balance} credits. A prediction needs {PREDICTION_COST}. "
+            f"Pay below to get {PACK_CREDITS} credits, or enter an access code."
+        )
+        paywall_forms("main")
+    else:
+        st.write(
+            f"Type a match, for example **Arsenal vs Chelsea**. "
+            f"Each prediction uses {PREDICTION_COST} credit. You have {current_balance}."
+        )
+        with st.form("predict_form"):
+            match_text = st.text_input("Match", placeholder="Arsenal vs Chelsea")
+            submitted = st.form_submit_button("Predict", type="primary")
+        if submitted:
+            run_prediction(match_text, code)
 
 with tab_fixtures:
     try:
