@@ -67,12 +67,14 @@ def fd_get(path):
     return r.json()
 
 
-# ---------- Login gate (Google only, no terms or age gate) ----------
+# ---------- Login (Google only, no terms or age gate) ----------
 if not st.user.is_logged_in:
     st.title("⚽ Matchday Prediction")
-    st.write("Sign in to see fixtures, tables and match predictions.")
-    if st.button("Continue with Google", type="primary"):
-        st.login("google")
+    tab_google, = st.tabs(["Sign in with Google"])
+    with tab_google:
+        st.write("Sign in with your Google account to continue.")
+        if st.button("Continue with Google", type="primary"):
+            st.login("google")
     st.stop()
 
 EMAIL = (st.user.email or "").lower()
