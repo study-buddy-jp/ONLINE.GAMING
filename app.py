@@ -5,7 +5,6 @@ import math
 import wave
 import struct
 import html
-import hmac
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -47,7 +46,6 @@ HISTORY_LIMIT = 20
 PACK_SIZE = 5             # prediction credits per pack
 CREDIT_KSH = 20           # shillings per prediction credit (pack price = PACK_SIZE * CREDIT_KSH)
 REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is paid
-MIN_AGE = 18
 NEW_CHAT_TITLE = "New chat"
 EAT = timezone(timedelta(hours=3))  # Nairobi time
 RECENT_N = 8        # finished matches per team used for form
@@ -68,7 +66,7 @@ QUICK_ACTIONS = [
     ("📋 Recent results", "Show the recent results of all leagues."),
     ("🎯 My predictions", "What were my predictions and their outcomes?"),
     ("🔥 Best form", "Which teams have the best form right now?"),
-    ("🔮 Predict a match", "Predict the next match of the top team in the table."),
+    ("🔮 Predict a match", "Predict Arsenal vs Chelsea"),
 ]
 
 # Words that mean the user wants a prediction (costs one credit)
@@ -219,9 +217,6 @@ div[data-testid="stPopover"] button { border-radius: 10px; padding: 0.25rem 0.5r
 """, unsafe_allow_html=True)
 
 # ---------- Session state ----------
-st.session_state.setdefault("accepted_terms", False)
-st.session_state.setdefault("age_ok", False)
-st.session_state.setdefault("age_blocked", False)
 st.session_state.setdefault("user_email", None)
 st.session_state.setdefault("conv_id", None)
 st.session_state.setdefault("messages", [])
@@ -238,6 +233,7 @@ st.session_state.setdefault("resolved", False)
 st.session_state.setdefault("lang", "en")
 st.session_state.setdefault("restored", False)
 st.session_state.setdefault("token", None)
+st.session_state.setdefault("pending_ref", "")
 
 # ---------- Header ----------
 st.markdown(f"""
@@ -293,38 +289,18 @@ def count_unique_signins():
     rows = sb.table("events").select("email").eq("kind", "signin").execute().data
     return len({r["email"] for r in rows if r.get("email")})
 
-def hash_pass(passcode, salt_hex):
-    return hashlib.pbkdf2_hmac(
-        "sha256", passcode.encode(), bytes.fromhex(salt_hex), 200_000
-    ).hex()
-
-def get_user(email):
-    res = sb.table("users").select("salt,pass_hash").eq("email", email).execute()
-    return res.data[0] if res.data else None
-
-def sign_in(email, passcode, ref_in=""):
-    """Returns (ok, message). Creates the account the first time an email is used.
-    ref_in is an optional referral code, used only for brand-new accounts."""
-    email = email.strip().lower()
-    if "@" not in email or "." not in email:
-        return False, "Please enter a valid email address."
-    user = get_user(email)
-    if user:
-        if hmac.compare_digest(hash_pass(passcode, user["salt"]), user["pass_hash"]):
-            return True, email
-        return False, "Wrong passcode for this email."
-    if len(passcode) < 6:
-        return False, "Choose a passcode of at least 6 characters."
-    salt = secrets.token_hex(16)
+def ensure_user(email, ref_in=""):
+    """Create the account the first time a Google sign-in is seen. No passcode is stored.
+    Returns True when a new account was created."""
+    if sb.table("users").select("email").eq("email", email).execute().data:
+        return False
     sb.table("users").insert({
         "email": email,
-        "salt": salt,
-        "pass_hash": hash_pass(passcode, salt),
+        "salt": "",
+        "pass_hash": "",
         "ref_code": secrets.token_hex(4).upper(),
         "created": now_iso(),
     }).execute()
-
-    # Link the new account to whoever shared the referral code
     ref_in = (ref_in or "").strip().upper()
     if ref_in:
         referrer = sb.table("users").select("email").eq("ref_code", ref_in).execute().data
@@ -332,9 +308,8 @@ def sign_in(email, passcode, ref_in=""):
             sb.table("referrals").insert({
                 "referee": email, "referrer": referrer[0]["email"],
             }).execute()
-
     log_event("signup", email)
-    return True, email
+    return True
 
 def track_line():
     """Public accuracy line. Counts every checked prediction the app made, including the owner's."""
@@ -455,7 +430,7 @@ def delete_all_chats():
     sb.table("conversations").delete().eq("email", email).execute()
     start_new_chat()
 
-# ----- Session persistence (survives browser refresh) -----
+# ----- Session persistence (a refresh keeps the same chat open) -----
 def ensure_token():
     """Create a session row once per browser visit and keep its token in the page link."""
     tok = st.session_state.get("token")
@@ -464,8 +439,6 @@ def ensure_token():
         sb.table("sessions").insert({
             "token": tok,
             "email": st.session_state.get("user_email"),
-            "terms_ok": bool(st.session_state.get("accepted_terms", False)),
-            "age_ok": bool(st.session_state.get("age_ok", False)),
             "conv_id": st.session_state.get("conv_id"),
             "created": now_iso(),
         }).execute()
@@ -474,7 +447,7 @@ def ensure_token():
     return tok
 
 def save_progress(**fields):
-    """Save progress (terms, age, email, chat) so a refresh brings the user back to the same place."""
+    """Save the email and open chat so a refresh brings the user back to the same place."""
     tok = ensure_token()
     sb.table("sessions").update(fields).eq("token", tok).execute()
 
@@ -486,17 +459,15 @@ def end_session():
     if "s" in st.query_params:
         del st.query_params["s"]
 
-# Restore a previous visit from the page link, once per browser load
+# Restore the open chat after a refresh, only if the Google account matches the saved session
 if not st.session_state.restored:
     st.session_state.restored = True
     tok = st.query_params.get("s")
-    if tok:
+    if tok and st.user.is_logged_in:
         rows = sb.table("sessions").select("*").eq("token", tok).execute().data
-        if rows:
+        if rows and rows[0]["email"] == (st.user.email or "").strip().lower():
             row = rows[0]
             st.session_state.token = tok
-            st.session_state.accepted_terms = bool(row["terms_ok"])
-            st.session_state.age_ok = bool(row["age_ok"])
             st.session_state.user_email = row["email"]
             st.session_state.conv_id = row["conv_id"]
             if row["conv_id"]:
@@ -565,63 +536,37 @@ def redeem_code(email, code):
     reward_referrer(email)
     return True, f"{PACK_SIZE} prediction credits added (KSh {PACK_SIZE * CREDIT_KSH})."
 
-# ---------- Step 1: terms ----------
-if not st.session_state.accepted_terms:
-    st.markdown(f'<div class="terms-small">{TERMS}</div>', unsafe_allow_html=True)
-    agree = st.checkbox("I have read and accept the terms.")
-    if st.button("Continue", disabled=not agree):
-        st.session_state.accepted_terms = True
-        save_progress(terms_ok=True)
-        st.rerun()
+# ---------- Sign in with Google (one tap, no passcode, no gate) ----------
+if not st.user.is_logged_in:
+    st.markdown(
+        '<div class="hero"><h3>Welcome to Matchday Prediction</h3>'
+        '<p>Sign in with Google to start. Fixtures, tables and form are free. '
+        'Predictions use credits.</p></div>',
+        unsafe_allow_html=True,
+    )
+    st.text_input("Referral code (optional)", key="pending_ref",
+                  placeholder="A friend's referral code, if you have one")
+    if st.button("Continue with Google", type="primary", use_container_width=True):
+        st.login("google")
+    st.caption("By continuing you agree to the Terms of Use below. Use is for people aged 18 or older.")
+    with st.expander("Terms of Use"):
+        st.markdown(f'<div class="terms-small">{TERMS}</div>', unsafe_allow_html=True)
     st.stop()
 
-# ---------- Step 2: age check ----------
-if st.session_state.age_blocked:
-    st.error(f"Sorry, you must be {MIN_AGE} or older to use {APP_NAME}, so you can't continue.")
+google_email = (st.user.email or "").strip().lower()
+if not google_email:
+    st.error("Google did not share an email address for this account. Try another Google account.")
     st.stop()
 
-if not st.session_state.age_ok:
-    st.markdown("### Confirm your age")
-    with st.form("age"):
-        age_txt = st.text_input("How old are you?", placeholder="e.g. 21")
-        age_submit = st.form_submit_button("Continue")
-    if age_submit:
-        age_clean = age_txt.strip()
-        if not age_clean.isdigit() or not (1 <= int(age_clean) <= 120):
-            st.error("Please enter your age as a number.")
-        elif int(age_clean) < MIN_AGE:
-            st.session_state.age_blocked = True
-            st.rerun()
-        else:
-            st.session_state.age_ok = True
-            save_progress(age_ok=True)
-            st.rerun()
-    st.stop()
-
-# ---------- Step 3: sign in ----------
-if not st.session_state.user_email:
-    st.markdown("### Sign in to keep your conversations")
-    st.caption("New here? Enter an email and choose a passcode. Returning? Use the same passcode.")
-    with st.form("signin"):
-        email_in = st.text_input("Email")
-        pass_in = st.text_input("Passcode (at least 6 characters)", type="password")
-        ref_txt = st.text_input("Referral code (optional, new accounts only)")
-        submitted = st.form_submit_button("Continue")
-    if submitted:
-        ok, result = sign_in(email_in, pass_in, ref_txt)
-        if ok:
-            log_event("signin", result)
-            st.session_state.user_email = result
-            # Every sign-in starts a fresh chat; older chats stay in the sidebar
-            st.session_state.conv_id = create_conversation(result)
-            st.session_state.messages = []
-            st.session_state.paywall = False
-            st.session_state.pop("chat", None)
-            save_progress(email=result, conv_id=st.session_state.conv_id)
-            st.rerun()
-        else:
-            st.error(result)
-    st.stop()
+# First time this browser visit signs in: create the account if new and open a chat
+if st.session_state.user_email != google_email:
+    st.session_state.user_email = google_email
+    ensure_user(google_email, st.session_state.get("pending_ref", ""))
+    log_event("signin", google_email)
+    if st.session_state.conv_id is None:
+        st.session_state.conv_id = create_conversation(google_email)
+        st.session_state.messages = []
+    save_progress(email=google_email, conv_id=st.session_state.conv_id)
 
 # ---------- Sidebar: account, chats, balance ----------
 st.sidebar.markdown(f"**Signed in as**  \n{st.session_state.user_email}")
@@ -662,14 +607,7 @@ if st.sidebar.button("🗑️ Delete all my chats"):
 
 if st.sidebar.button("Sign out"):
     end_session()
-    st.session_state.user_email = None
-    st.session_state.conv_id = None
-    st.session_state.messages = []
-    st.session_state.paywall = False
-    st.session_state.accepted_terms = False
-    st.session_state.age_ok = False
-    st.session_state.pop("chat", None)
-    st.rerun()
+    st.logout()
 
 st.sidebar.markdown(stats_card(prediction_stats(), "All predictions"), unsafe_allow_html=True)
 st.sidebar.markdown(stats_card(prediction_stats(st.session_state.user_email), "My record"),
@@ -682,6 +620,9 @@ st.sidebar.caption(
     f"with it buys their first pack."
 )
 st.sidebar.caption("Credits stay on your account when you delete chats.")
+
+with st.sidebar.expander("📄 Terms of Use"):
+    st.markdown(f'<div class="terms-small">{TERMS}</div>', unsafe_allow_html=True)
 
 # ---------- About (business identity, for transparency) ----------
 with st.sidebar.expander("ℹ️ About this app"):
@@ -784,969 +725,3 @@ def team_finished(team_id, _key, n=20):
     try:
         r = requests.get(
             f"https://api.football-data.org/v4/teams/{team_id}/matches",
-            headers={"X-Auth-Token": _key},
-            params={"status": "FINISHED", "limit": n},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return None
-        return r.json().get("matches", [])
-    except Exception:
-        return None
-
-@st.cache_data(ttl=3600)
-def team_scheduled(team_id, _key):
-    """Next scheduled matches for one team. Cached for an hour."""
-    if not _key:
-        return None
-    try:
-        r = requests.get(
-            f"https://api.football-data.org/v4/teams/{team_id}/matches",
-            headers={"X-Auth-Token": _key},
-            params={"status": "SCHEDULED", "limit": 3},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return None
-        return r.json().get("matches", [])
-    except Exception:
-        return None
-
-@st.cache_data(ttl=3600)
-def finished_matches(code, _key):
-    """Finished matches for one league. Cached for an hour."""
-    if not _key:
-        return []
-    try:
-        r = requests.get(
-            f"https://api.football-data.org/v4/competitions/{code}/matches",
-            headers={"X-Auth-Token": _key},
-            params={"status": "FINISHED"},
-            timeout=10,
-        )
-        if r.status_code != 200:
-            return []
-        return r.json().get("matches", [])
-    except Exception:
-        return []
-
-def fmt_kickoff(utc_str):
-    """Turn football-data's UTC time into Nairobi time, e.g. 'Sat 18 Oct, 17:30'."""
-    dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00")).astimezone(EAT)
-    return dt.strftime("%a %d %b, %H:%M")
-
-def days_between(utc_str):
-    dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
-    return (datetime.now(timezone.utc) - dt).days
-
-def table_intent(text):
-    t = text.lower()
-    if any(w in t for w in ["table", "standings", "league position"]):
-        return "table"
-    if any(w in t for w in ["fixture", "upcoming", "schedule", "next match", "next games"]):
-        return "fixtures"
-    return None
-
-def dtable(headers, rows):
-    head = "".join(f"<th>{h}</th>" for h in headers)
-    body = "".join(rows)
-    return (f'<div class="dtable-wrap"><table class="dtable">'
-            f'<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>')
-
-def fixtures_html(code):
-    matches, err = league_fixtures(code, FOOTBALL_KEY)
-    if not matches:
-        return f"<p>Fixtures are unavailable right now ({html.escape(str(err or 'no matches'))}).</p>"
-    rows = []
-    for m in matches[:20]:
-        rows.append(
-            "<tr>"
-            f"<td>{html.escape(str(m.get('matchday') or '-'))}</td>"
-            f"<td>{fmt_kickoff(m['utcDate'])}</td>"
-            f"<td class='name'>{html.escape(m['homeTeam']['name'])}</td>"
-            "<td>vs</td>"
-            f"<td class='name'>{html.escape(m['awayTeam']['name'])}</td>"
-            "</tr>"
-        )
-    return dtable(["Matchday", "Kickoff (Nairobi)", "Home", "", "Away"], rows)
-
-def standings_html(code):
-    table, err = league_table(code, FOOTBALL_KEY)
-    if not table:
-        return f"<p>The table is unavailable right now ({html.escape(str(err or 'no table'))}).</p>"
-    rows = []
-    for r in table:
-        gd = r.get("goalDifference", 0)
-        gd_txt = f"+{gd}" if gd > 0 else str(gd)
-        form = r.get("form") or "-"
-        form = " ".join(x for x in form.split(",") if x) if form != "-" else "-"
-        rows.append(
-            "<tr>"
-            f"<td>{r['position']}</td>"
-            f"<td class='name'>{html.escape(r['team']['name'])}</td>"
-            f"<td>{r['playedGames']}</td>"
-            f"<td>{r['won']}</td>"
-            f"<td>{r['draw']}</td>"
-            f"<td>{r['lost']}</td>"
-            f"<td>{r['goalsFor']}</td>"
-            f"<td>{r['goalsAgainst']}</td>"
-            f"<td>{gd_txt}</td>"
-            f"<td><b>{r['points']}</b></td>"
-            f"<td>{html.escape(form)}</td>"
-            "</tr>"
-        )
-    return dtable(["#", "Team", "P", "W", "D", "L", "GF", "GA", "GD", "Pts", "Form"], rows)
-
-def results_html(codes, limit=30):
-    rows = []
-    for code in codes:
-        for m in finished_matches(code, FOOTBALL_KEY):
-            ft = (m.get("score") or {}).get("fullTime") or {}
-            if ft.get("home") is None or ft.get("away") is None:
-                continue
-            rows.append((m["utcDate"], m["homeTeam"]["name"], ft["home"], ft["away"], m["awayTeam"]["name"]))
-    rows.sort(reverse=True)
-    if not rows:
-        return "<p>No finished results to show yet.</p>"
-    body = [
-        "<tr>"
-        f"<td>{fmt_kickoff(d)}</td>"
-        f"<td class='name'>{html.escape(h)}</td>"
-        f"<td><b>{hs} - {as_}</b></td>"
-        f"<td class='name'>{html.escape(a)}</td>"
-        "</tr>"
-        for d, h, hs, as_, a in rows[:limit]
-    ]
-    return dtable(["Date (Nairobi)", "Home", "Score", "Away"], body)
-
-def fixtures_context(code, limit=10):
-    matches, err = league_fixtures(code, FOOTBALL_KEY)
-    if not matches:
-        return f"Live fixture data is unavailable right now ({err or 'no matches returned'})."
-    lines = []
-    for m in matches[:limit]:
-        date = m["utcDate"][:16].replace("T", " ")
-        lines.append(f"{date} UTC: {m['homeTeam']['name']} vs {m['awayTeam']['name']}")
-    return "Upcoming fixtures:\n" + "\n".join(lines)
-
-def table_context(code, limit=20):
-    table, err = league_table(code, FOOTBALL_KEY)
-    if not table:
-        return f"League table is unavailable right now ({err or 'no table returned'})."
-    lines = []
-    for row in table[:limit]:
-        lines.append(
-            f"{row['position']}. {row['team']['name']} (id {row['team']['id']}): "
-            f"P{row['playedGames']} W{row['won']} D{row['draw']} L{row['lost']} "
-            f"GF{row['goalsFor']} GA{row['goalsAgainst']} Pts{row['points']}"
-        )
-    return "Current table:\n" + "\n".join(lines)
-
-def team_profile(team_id, team_name, league_code):
-    """Structured context for one team: form, home/away splits, rest, next fixture.
-    Only lines the football data provides are included."""
-    lines = [f"{team_name}:"]
-
-    games = team_finished(team_id, FOOTBALL_KEY) or []
-    scored_games = []
-    for g in games:
-        ft = (g.get("score") or {}).get("fullTime") or {}
-        if ft.get("home") is None or ft.get("away") is None:
-            continue
-        if g.get("competition", {}).get("code") != league_code and league_code != "CL":
-            continue
-        scored_games.append(g)
-    scored_games = scored_games[:RECENT_N]
-
-    if scored_games:
-        pts = 0
-        gf = ga = 0
-        h_gf = h_ga = h_n = a_gf = a_ga = a_n = 0
-        results = []
-        for g in scored_games:
-            ft = g["score"]["fullTime"]
-            is_home = g["homeTeam"]["id"] == team_id
-            mine = ft["home"] if is_home else ft["away"]
-            theirs = ft["away"] if is_home else ft["home"]
-            opp = g["awayTeam"]["name"] if is_home else g["homeTeam"]["name"]
-            if mine > theirs:
-                res, pts = "W", pts + 3
-            elif mine < theirs:
-                res = "L"
-            else:
-                res, pts = "D", pts + 1
-            gf += mine
-            ga += theirs
-            if is_home:
-                h_gf += mine; h_ga += theirs; h_n += 1
-            else:
-                a_gf += mine; a_ga += theirs; a_n += 1
-            results.append(f"{res} {mine}-{theirs} vs {opp} ({'H' if is_home else 'A'})")
-        n = len(scored_games)
-        lines.append(f"  Last {n} league/CL matches: {pts} pts, "
-                     f"scored {gf/n:.2f}/game, conceded {ga/n:.2f}/game")
-        if h_n:
-            lines.append(f"  Home ({h_n}): scored {h_gf/h_n:.2f}, conceded {h_ga/h_n:.2f} per game")
-        if a_n:
-            lines.append(f"  Away ({a_n}): scored {a_gf/a_n:.2f}, conceded {a_ga/a_n:.2f} per game")
-        lines.append("  Results (newest first): " + "; ".join(results))
-        last_date = scored_games[0].get("utcDate")
-        if last_date:
-            lines.append(f"  Days since last match: {days_between(last_date)}")
-
-    nxt = team_scheduled(team_id, FOOTBALL_KEY) or []
-    if nxt:
-        m = nxt[0]
-        venue = "home" if m["homeTeam"]["id"] == team_id else "away"
-        opp = m["awayTeam"]["name"] if venue == "home" else m["homeTeam"]["name"]
-        lines.append(f"  Next match: {fmt_kickoff(m['utcDate'])} EAT, {venue} vs {opp}")
-    return "\n".join(lines)
-
-def head_to_head(home_id, away_id, home_name, away_name):
-    games = team_finished(home_id, FOOTBALL_KEY) or []
-    meet = []
-    for g in games:
-        ids = {g["homeTeam"]["id"], g["awayTeam"]["id"]}
-        ft = (g.get("score") or {}).get("fullTime") or {}
-        if away_id in ids and ft.get("home") is not None:
-            meet.append(
-                f"{g['homeTeam']['name']} {ft['home']}-{ft['away']} {g['awayTeam']['name']} "
-                f"({g.get('utcDate', '')[:10]})"
-            )
-    meet = meet[:H2H_N]
-    if not meet:
-        return ""
-    return f"Head-to-head ({home_name} vs {away_name}), most recent first:\n  " + "\n  ".join(meet)
-
-def match_context(code):
-    return fixtures_context(code) + "\n\n" + table_context(code)
-
-def prediction_context(code, home_name, away_name):
-    """Full context for a named match: both team profiles plus head-to-head."""
-    table, _ = league_table(code, FOOTBALL_KEY)
-    if not table:
-        return "League table unavailable, so team data cannot be built."
-    by_name = {}
-    for row in table:
-        by_name[row["team"]["name"].lower()] = row["team"]
-    h = next((t for n, t in by_name.items() if home_name.lower() in n), None)
-    a = next((t for n, t in by_name.items() if away_name.lower() in n), None)
-    if not h or not a:
-        return "Could not match both teams in this league's table."
-    parts = [
-        team_profile(h["id"], h["name"], code),
-        team_profile(a["id"], a["name"], code),
-        head_to_head(h["id"], a["id"], h["name"], a["name"]),
-    ]
-    return "\n\n".join(p for p in parts if p)
-
-def find_teams_in_question(code, text):
-    """Return (home, away) names if the question names two teams in this league."""
-    table, _ = league_table(code, FOOTBALL_KEY)
-    if not table:
-        return None
-    t = text.lower()
-    found = [row["team"]["name"] for row in table
-             if row["team"]["name"].lower() in t or row["team"].get("shortName", "").lower() in t]
-    if len(found) >= 2:
-        return found[0], found[1]
-    return None
-
-def find_team_rows(code, text):
-    """Return (home, away) team dicts in the order named in the question."""
-    table, _ = league_table(code, FOOTBALL_KEY)
-    if not table:
-        return None
-    t = text.lower()
-    hits = []
-    for row in table:
-        for name in (row["team"]["name"], row["team"].get("shortName") or ""):
-            i = t.find(name.lower()) if name else -1
-            if i >= 0:
-                hits.append((i, row["team"]))
-                break
-    hits.sort(key=lambda x: x[0])
-    if len(hits) >= 2:
-        return hits[0][1], hits[1][1]
-    return None
-
-def parse_probs(text):
-    t = text.lower()
-    def grab(label):
-        m = re.search(label + r"[^\d%\n]{0,25}?(\d+(?:\.\d+)?)\s*%", t)
-        return float(m.group(1)) if m else None
-    h, d, a = grab(r"home win"), grab(r"draw"), grab(r"away win")
-    if None in (h, d, a):
-        return None
-    return h, d, a
-
-def log_prediction(email, code, home, away, probs):
-    sb.table("predictions").insert({
-        "email": email, "league": code,
-        "home_id": home["id"], "away_id": away["id"],
-        "home": home["name"], "away": away["name"],
-        "p_home": probs[0], "p_draw": probs[1], "p_away": probs[2],
-        "created": now_iso(),
-    }).execute()
-
-def resolve_predictions():
-    rows = (sb.table("predictions")
-            .select("id,home_id,away_id,p_home,p_draw,p_away,created")
-            .is_("outcome", "null").execute().data)
-    for r in rows:
-        pid, hid, aid = r["id"], r["home_id"], r["away_id"]
-        ph, pd_, pa = r["p_home"], r["p_draw"], r["p_away"]
-        made = datetime.fromisoformat(r["created"])
-        if made.tzinfo is None:
-            made = made.replace(tzinfo=timezone.utc)
-        for g in team_finished(hid, FOOTBALL_KEY) or []:
-            ids = {g["homeTeam"]["id"], g["awayTeam"]["id"]}
-            ft = (g.get("score") or {}).get("fullTime") or {}
-            if aid not in ids or ft.get("home") is None:
-                continue
-            played = datetime.fromisoformat(g["utcDate"].replace("Z", "+00:00"))
-            if played < made:
-                continue
-            if g["homeTeam"]["id"] == hid:
-                hg, ag = ft["home"], ft["away"]
-            else:
-                hg, ag = ft["away"], ft["home"]
-            outcome = "H" if hg > ag else ("A" if ag > hg else "D")
-            predicted = max([("H", ph), ("D", pd_), ("A", pa)], key=lambda x: x[1])[0]
-            sb.table("predictions").update({
-                "outcome": outcome, "correct": int(predicted == outcome),
-            }).eq("id", pid).execute()
-            break
-
-# Check predictions against finished results once per session
-if not st.session_state.resolved:
-    resolve_predictions()
-    st.session_state.resolved = True
-
-# ---------- Chat setup ----------
-SYSTEM_PROMPT = (
-    "You are Matchday Prediction, a football match analyst for fans of top European leagues. "
-    "Use only the data provided in each message. Quote the figures you rely on. "
-    "Never mention missing, unavailable or unknown data, and never say what you do not know. "
-    "Simply leave out anything the data does not cover, and talk only about what is there. "
-    "Never assume any player is fit or injured. "
-    "When model figures are provided, use exactly the percentages given and do not change them. "
-    "Give three short reasons that cite the figures. Never present a prediction as "
-    "certain, never give betting tips, and never encourage betting. If asked about betting, "
-    "briefly explain that you analyse matches but do not advise on bets. If the user attaches "
-    "a screenshot or PDF, read it carefully and use it. Keep replies concise and clear."
-)
-
-def gemini_history(msgs):
-    out = []
-    for m in msgs[-HISTORY_LIMIT:]:
-        if m["role"] not in ("user", "assistant"):
-            continue  # table and card rows are display-only, never sent to the model
-        role = "user" if m["role"] == "user" else "model"
-        out.append(types.Content(role=role, parts=[types.Part(text=m["text"])]))
-    return out
-
-def new_chat(history):
-    return client.chats.create(
-        model=MODEL,
-        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
-        history=history,
-    )
-
-if "chat" not in st.session_state:
-    st.session_state.chat = new_chat(gemini_history(st.session_state.messages))
-
-def current_attachment():
-    return st.session_state.get(f"att_{st.session_state.att_n}")
-
-def submit_draft():
-    text = st.session_state.get("draft", "").strip()
-    att = current_attachment()
-    if text or att is not None:
-        st.session_state.to_send = text or "Please analyse this file."
-    st.session_state.draft = ""
-
-def pick_quick(question):
-    st.session_state.to_send = question
-
-def needs_credit(text_in):
-    """Decide with keywords only, so each question uses one model call at most.
-    The percentage check in ask() still catches predictions that slip through."""
-    t = text_in.lower()
-    if any(w in t for w in GENERAL_KEYWORDS):
-        return False
-    if any(w in t for w in PAID_KEYWORDS):
-        return True
-    return False
-
-def speak(text):
-    try:
-        r = client.models.generate_content(
-            model=TTS_MODEL,
-            contents=text[:1500],
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME)
-                    )
-                ),
-            ),
-        )
-        pcm = r.candidates[0].content.parts[0].inline_data.data
-        return pcm_to_wav(pcm, 24000)
-    except Exception:
-        return None
-
-def team_card(team_id, team_name, league_code):
-    """One team's stats as a card. Lines the data does not provide are left out."""
-    games = team_finished(team_id, FOOTBALL_KEY) or []
-    scored = []
-    for g in games:
-        ft = (g.get("score") or {}).get("fullTime") or {}
-        if ft.get("home") is None or ft.get("away") is None:
-            continue
-        if g.get("competition", {}).get("code") != league_code and league_code != "CL":
-            continue
-        scored.append(g)
-    scored = scored[:RECENT_N]
-
-    results, gf, ga = [], 0, 0
-    hw = hd = hl = aw = ad = al = 0
-    for g in scored:
-        ft = g["score"]["fullTime"]
-        is_home = g["homeTeam"]["id"] == team_id
-        mine = ft["home"] if is_home else ft["away"]
-        theirs = ft["away"] if is_home else ft["home"]
-        gf += mine
-        ga += theirs
-        if mine > theirs:
-            res = "W"
-            if is_home: hw += 1
-            else: aw += 1
-        elif mine < theirs:
-            res = "L"
-            if is_home: hl += 1
-            else: al += 1
-        else:
-            res = "D"
-            if is_home: hd += 1
-            else: ad += 1
-        results.append(res)
-
-    n = len(scored)
-    parts = []
-    if n:
-        pts = sum(3 if r == "W" else 1 if r == "D" else 0 for r in results)
-        form_html = "".join(
-            f'<span class="{ {"W": "f-w", "D": "f-d", "L": "f-l"}[r] }">{r}</span>'
-            for r in results[:5]
-        )
-        parts.append(
-            f'<div class="tcard-grid">'
-            f'<div>Last {n}: <b>{pts} pts</b></div>'
-            f'<div>Goals: <b>{gf/n:.2f} for, {ga/n:.2f} against</b> per game</div>'
-            f'<div>Home: <b>{hw}W {hd}D {hl}L</b></div>'
-            f'<div>Away: <b>{aw}W {ad}D {al}L</b></div>'
-            f'<div>Last match: <b>{days_between(scored[0]["utcDate"])} days ago</b></div>'
-            f'</div>'
-            f'<div class="tcard-form">Recent form: {form_html}</div>'
-        )
-
-    nxt = team_scheduled(team_id, FOOTBALL_KEY) or []
-    badge = ""
-    if nxt:
-        m = nxt[0]
-        venue = "home" if m["homeTeam"]["id"] == team_id else "away"
-        opp = m["awayTeam"]["name"] if venue == "home" else m["homeTeam"]["name"]
-        badge = (f'<span class="tcard-badge">Next: {fmt_kickoff(m["utcDate"])} '
-                 f'({venue} vs {html.escape(opp)})</span>')
-
-    head = (f'<div class="tcard-head"><span class="tcard-name">{html.escape(team_name)}</span>'
-            f'{badge}</div>')
-    return f'<div class="tcard">{head}{"".join(parts)}</div>'
-
-# Common Swahili words. Two or more in a message switch the reply to Swahili.
-SW_WORDS = {
-    "habari", "mechi", "nani", "je", "ni", "naomba", "nataka", "unaweza", "sasa",
-    "leo", "kesho", "karibu", "timu", "utabiri", "msimamo", "ratiba", "kwa", "na",
-    "wapi", "gani", "vipi", "ipi", "asante", "tafadhali",
-}
-
-def detect_lang(text):
-    """Return 'sw' if the message has at least two common Swahili words, otherwise 'en'."""
-    words = set(re.findall(r"[a-zA-Z]+", text.lower()))
-    return "sw" if len(words & SW_WORDS) >= 2 else "en"
-
-LABELS = {
-    "en": {"chances": "Estimated chances", "draw": "Draw", "reply_in": "English",
-           "paywall": ("Predictions and probability estimates use prediction credits, and you have none left. "
-                       "Pay below to add more. General questions about fixtures, form, "
-                       "and the table are still free."),
-           "was_prediction": "That was a prediction, which uses prediction credits. Pay below to add more.",
-           "failed": "I couldn't get an analysis just now. Please try again or rephrase your question.",
-           "correct": "✔ Correct predictions", "wrong": "✘ Wrong predictions",
-           "pending": "⏳ Awaiting result", "summary": "Summary"},
-    "sw": {"chances": "Uwezekano unaokadiriwa", "draw": "Sare", "reply_in": "Swahili",
-           "paywall": ("Utabiri na makadirio ya uwezekano hutumia salio la utabiri, nawe huna salio. "
-                       "Lipa hapa chini ili kuongeza. Maswali ya ratiba, msimamo na fomu bado ni bure."),
-           "was_prediction": "Hilo lilikuwa utabiri, unaotumia salio la utabiri. Lipa hapa chini ili kuongeza.",
-           "failed": "Sikuweza kupata uchambuzi sasa hivi. Tafadhali jaribu tena au uulize kwa njia nyingine.",
-           "correct": "✔ Utabiri sahihi", "wrong": "✘ Utabiri usio sahihi",
-           "pending": "⏳ Inasubiri matokeo", "summary": "Muhtasari"},
-}
-
-NO_HISTORY = {
-    "en": "There is not enough finished match history for these two teams in this league yet, so no prediction was made and no credit was used.",
-    "sw": "Hakuna historia ya kutosha ya mechi kwa timu hizi mbili kwenye ligi hii bado, kwa hiyo hakuna utabiri na salio halijatumika.",
-}
-
-RESULT_WORDS = ["result", "score", "outcome", "finished", "full time",
-                "accuracy", "record", "percentage", "how many"]
-MINE_WORDS = [
-    "my prediction", "my predictions", "predictions were", "predicted", "i predicted",
-    "today's predictions", "todays predictions", "past predictions", "previous predictions",
-    "my picks",
-]
-
-def results_intent(text):
-    t = text.lower()
-    return any(w in t for w in RESULT_WORDS + MINE_WORDS)
-
-def is_mine_intent(text):
-    t = text.lower()
-    return any(w in t for w in MINE_WORDS)
-
-def my_predictions_html(email, today_only=False):
-    L = LABELS[st.session_state.get("lang", "en")]
-    rows = (sb.table("predictions")
-            .select("home,away,p_home,p_draw,p_away,outcome,correct,created")
-            .eq("email", email).order("id", desc=True).limit(50).execute().data)
-    if today_only:
-        today = datetime.now(EAT).date()
-        rows = [r for r in rows
-                if datetime.fromisoformat(r["created"]).astimezone(EAT).date() == today]
-    if not rows:
-        return "<p>No predictions to show for this period.</p>"
-
-    def cells(r):
-        probs = {"H": r["p_home"], "D": r["p_draw"], "A": r["p_away"]}
-        names = {"H": r["home"], "D": L["draw"], "A": r["away"]}
-        pick = max(probs, key=probs.get)
-        when = datetime.fromisoformat(r["created"]).astimezone(EAT).strftime("%d %b")
-        res = "-" if r["outcome"] is None else names[r["outcome"]]
-        return (
-            f"<td>{when}</td>"
-            f"<td class='name'>{html.escape(r['home'])} vs {html.escape(r['away'])}</td>"
-            f"<td>{html.escape(names[pick])} ({probs[pick]:.0f}%)</td>"
-            f"<td>{html.escape(res)}</td>"
-        )
-
-    correct = [r for r in rows if r["outcome"] is not None and r["correct"]]
-    wrong = [r for r in rows if r["outcome"] is not None and not r["correct"]]
-    pending = [r for r in rows if r["outcome"] is None]
-    played = len(correct) + len(wrong)
-    cpct = f"{len(correct) / played * 100:.1f}%" if played else "-"
-    wpct = f"{len(wrong) / played * 100:.1f}%" if played else "-"
-
-    out = (
-        f'<div class="pbox"><div class="pbox-title">{L["summary"]}</div>'
-        f"<div>Checked: <b>{played}</b></div>"
-        f"<div>Correct: <b>{len(correct)} of {played} ({cpct})</b></div>"
-        f"<div>Wrong: <b>{len(wrong)} of {played} ({wpct})</b></div>"
-        f"<div>Awaiting result: <b>{len(pending)}</b></div>"
-        "</div>"
-    )
-    headers = ["Made", "Match", "Most likely", "Result"]
-    if correct:
-        out += f'<div class="quick-title">{L["correct"]}</div>'
-        out += dtable(headers, [f"<tr>{cells(r)}</tr>" for r in correct])
-    if wrong:
-        out += f'<div class="quick-title">{L["wrong"]}</div>'
-        out += dtable(headers, [f"<tr>{cells(r)}</tr>" for r in wrong])
-    if pending:
-        out += f'<div class="quick-title">{L["pending"]}</div>'
-        out += dtable(headers, [f"<tr>{cells(r)}</tr>" for r in pending])
-    return out
-
-def results_block(text_in, email, league_code):
-    """Answer a results, record, or my-predictions question. Free: no model call, no credit."""
-    t = text_in.lower()
-    if any(w in t for w in ["accuracy", "record", "percentage", "how many"]):
-        return (stats_card(prediction_stats(email), "My record")
-                + stats_card(prediction_stats(), "All predictions"))
-    if is_mine_intent(text_in):
-        return my_predictions_html(email, today_only="today" in t)
-    if "all" in t or "every" in t:
-        codes = list(LEAGUES.values())
-    else:
-        codes = [league_code]
-    return results_html(codes)
-
-def prob_bars(home, away, probs):
-    """The estimated chances at the bottom of a prediction, in the current language."""
-    L = LABELS[st.session_state.get("lang", "en")]
-    rows = [(home, probs[0]), (L["draw"], probs[1]), (away, probs[2])]
-    body = "".join(
-        f'<div class="pbar-row"><span>{html.escape(label)}</span>'
-        f'<div class="pbar"><div class="pfill" style="width:{p:.0f}%"></div></div>'
-        f'<b>{p:.0f}%</b></div>'
-        for label, p in rows
-    )
-    return f'<div class="pbox"><div class="pbox-title">{L["chances"]}</div>{body}</div>'
-
-def model_figures(code, home, away):
-    """Elo and Poisson figures for a match, from the league's finished matches."""
-    matches = sorted(finished_matches(code, FOOTBALL_KEY), key=lambda m: m["utcDate"])
-    return model_predict(matches, home["id"], away["id"])
-
-def figures_block(f):
-    """The model's figures as plain text for Gemini to explain."""
-    return (
-        f"Model figures for {f['home']} (home) vs {f['away']} (away):\n"
-        f"Elo rating: {f['home']} {f['home_elo']}, {f['away']} {f['away_elo']}\n"
-        f"Elo-based home win chance: {f['elo_home_pct']}%\n"
-        f"Expected goals: {f['home']} {f['home_xg']}, {f['away']} {f['away_xg']}\n"
-        f"Poisson probabilities: home win {f['p_home']}%, draw {f['p_draw']}%, away win {f['p_away']}%"
-    )
-
-def start_mpesa_payment(email, phone):
-    """Send the STK prompt and record it, so the callback knows who to credit."""
-    phone = normalise_phone(phone)
-    amount = PACK_SIZE * CREDIT_KSH
-    status, body = stk_push(
-        get_secret("DARAJA_ENV", "sandbox"),
-        get_secret("DARAJA_CONSUMER_KEY"), get_secret("DARAJA_CONSUMER_SECRET"),
-        get_secret("DARAJA_SHORTCODE"), get_secret("DARAJA_PASSKEY"),
-        get_secret("DARAJA_CALLBACK_URL"),
-        phone, amount, "MATCHDAY",
-    )
-    if status == 200 and body.get("ResponseCode") == "0":
-        sb.table("mpesa_payments").insert({
-            "checkout_request_id": body["CheckoutRequestID"],
-            "email": email,
-            "amount": amount,
-            "status": "pending",
-            "created": now_iso(),
-        }).execute()
-        return True, ("Check your phone and enter your M-Pesa PIN. "
-                      "Credits are added automatically once payment is confirmed.")
-    return False, f"Payment could not start: {body.get('errorMessage', 'unknown error')}"
-
-def ask(text_in, label, league_code, attachment=None):
-    email = st.session_state.user_email
-    add_message("user", label)
-
-    # Follow the language of the message just sent
-    st.session_state.lang = detect_lang(text_in)
-    L = LABELS[st.session_state.lang]
-
-    # Results, records and my-predictions questions are answered from data, free
-    if results_intent(text_in):
-        add_message("table", results_block(text_in, email, league_code))
-        return
-
-    # Tables and fixtures come straight from the football data (free, no model call)
-    if not needs_credit(text_in):
-        kind = table_intent(text_in)
-        if kind == "table":
-            add_message("table", standings_html(league_code))
-            return
-        if kind == "fixtures":
-            add_message("table", fixtures_html(league_code))
-            return
-
-    paid = needs_credit(text_in)
-    pair = find_team_rows(league_code, text_in) if paid else None
-
-    # Run the model before charging, so no credit is spent on a match it cannot cover
-    figs = None
-    if paid and pair:
-        figs = model_figures(league_code, pair[0], pair[1])
-        if figs is None:
-            add_message("assistant", NO_HISTORY[st.session_state.lang])
-            return
-
-    if paid and not is_owner(email) and get_credits(email) < 1:
-        st.session_state.paywall = True
-        add_message("assistant", L["paywall"])
-        return
-
-    if figs:
-        context = (figures_block(figs) + "\n\n"
-                   + prediction_context(league_code, figs["home"], figs["away"]))
-        instruction = (
-            f"\n\nUse exactly these percentages: Home win {figs['p_home']}%, "
-            f"Draw {figs['p_draw']}%, Away win {figs['p_away']}%. Do not change them. "
-            "Then give three short reasons that cite the figures above."
-        )
-    else:
-        context = match_context(league_code)
-        instruction = ""
-    instruction = f"\n\nReply in {L['reply_in']}." + instruction
-
-    question = f"{context}\n\nUser question: {text_in}{instruction}"
-    content = question
-    if attachment is not None:
-        part = types.Part.from_bytes(data=attachment.getvalue(), mime_type=attachment.type)
-        content = [part, question]
-
-    text = ""
-    for attempt in range(2):
-        try:
-            with st.spinner("Analysing..."):
-                reply = st.session_state.chat.send_message(content)
-            text = (reply.text or "").strip()
-        except Exception:
-            text = ""
-        if text:
-            break
-
-    if not text:
-        add_message("assistant", L["failed"])
-        return
-
-    # Guard: an unpaid answer with percentages counts as a prediction
-    if not paid and not is_owner(email) and re.search(r"\d+\s*%", text):
-        paid = True
-        if get_credits(email) < 1:
-            st.session_state.paywall = True
-            add_message("assistant", L["was_prediction"])
-            return
-
-    if paid and not is_owner(email):
-        spend_credit(email)
-
-    probs = None
-    if paid and figs:
-        probs = (figs["p_home"], figs["p_draw"], figs["p_away"])
-        log_prediction(email, league_code, pair[0], pair[1], probs)
-        add_message("table", team_card(pair[0]["id"], pair[0]["name"], league_code)
-                    + team_card(pair[1]["id"], pair[1]["name"], league_code))
-
-    if st.session_state.reply_mode in ("Voice", "Both"):
-        with st.spinner("Preparing voice..."):
-            st.session_state.pending_voice = speak(text)
-
-    # Reasons first, then the model's estimated chances at the bottom
-    add_message("assistant", text)
-    if probs:
-        add_message("table", prob_bars(figs["home"], figs["away"], probs))
-
-def transcribe(data):
-    try:
-        part = types.Part.from_bytes(data=data, mime_type="audio/wav")
-        r = client.models.generate_content(
-            model=TRANSCRIBE_MODEL,
-            contents=[part, "Transcribe this speech exactly. Reply with only the words spoken."],
-        )
-        return (r.text or "").strip()
-    except Exception:
-        return ""
-
-def render_home(league_code):
-    """Start screen shown before the first message: welcome, track record, fixtures, quick actions."""
-    hero = (
-        '<div class="hero">'
-        '<h3>Welcome to Matchday Prediction</h3>'
-        '<p>Pick a league, then check fixtures, tables and team form. '
-        'Ask for a prediction when you want one. General questions are free.</p>'
-        '<div class="steps">'
-        '<div class="step"><b>1. Pick a league</b>Choose from the top five and the Champions League.</div>'
-        '<div class="step"><b>2. Ask anything</b>Type, speak, or tap a quick action below.</div>'
-        '<div class="step"><b>3. Get analysis</b>Predictions show estimated chances, not guarantees.</div>'
-        '</div></div>'
-    )
-    st.markdown(hero, unsafe_allow_html=True)
-    st.markdown(stats_card(prediction_stats(), "Track record: all predictions"),
-                unsafe_allow_html=True)
-
-    st.markdown('<p class="quick-title">Next matches</p>', unsafe_allow_html=True)
-    matches, err = league_fixtures(league_code, FOOTBALL_KEY)
-    if matches:
-        for m in matches[:5]:
-            home = html.escape(m["homeTeam"]["name"])
-            away = html.escape(m["awayTeam"]["name"])
-            when = fmt_kickoff(m["utcDate"])
-            st.markdown(
-                f'<div class="fx"><span>{home} vs {away}</span>'
-                f'<span class="fx-date">{when}</span></div>',
-                unsafe_allow_html=True,
-            )
-    else:
-        st.caption("Fixtures are unavailable for this league right now. You can still ask questions.")
-
-    st.markdown('<p class="quick-title">What would you like to know?</p>', unsafe_allow_html=True)
-    for i in range(0, len(QUICK_ACTIONS), 2):
-        cols = st.columns(2)
-        for j, col in enumerate(cols):
-            if i + j < len(QUICK_ACTIONS):
-                label, question = QUICK_ACTIONS[i + j]
-                with col:
-                    st.button(
-                        label,
-                        key=f"qa_{i + j}",
-                        on_click=pick_quick,
-                        args=(question,),
-                        use_container_width=True,
-                    )
-
-# ---------- League and reply mode ----------
-c_league, c_mode = st.columns([3, 2], vertical_alignment="center")
-with c_league:
-    st.selectbox("League", list(LEAGUES.keys()), key="league")
-with c_mode:
-    st.radio("Reply", REPLY_MODES, key="reply_mode", horizontal=True)
-
-league_code = LEAGUES[st.session_state.league]
-
-# ---------- Start screen (empty chat) or chat box (has messages) ----------
-if st.session_state.messages:
-    chat_box = st.container(height=CHAT_HEIGHT, border=False)
-else:
-    render_home(league_code)
-
-if current_attachment() is not None:
-    st.markdown(
-        f'<p class="attach-note">📎 {html.escape(current_attachment().name)} attached</p>',
-        unsafe_allow_html=True,
-    )
-
-# ---------- Input row ----------
-c_plus, c_text, c_mic, c_send = st.columns([1.2, 9, 1.6, 1.6], vertical_alignment="center")
-with c_plus:
-    with st.popover("+"):
-        st.file_uploader(
-            "Add a screenshot or PDF",
-            type=ATTACH_TYPES,
-            key=f"att_{st.session_state.att_n}",
-        )
-with c_text:
-    st.text_input(
-        "Message",
-        key="draft",
-        placeholder="Ask about a match or the table...",
-        label_visibility="collapsed",
-        on_change=submit_draft,
-    )
-with c_mic:
-    with st.popover("🎤"):
-        audio = st.audio_input("Record your question", key="rec")
-with c_send:
-    st.button("➤", on_click=submit_draft)
-
-prompt = st.session_state.get("to_send", "")
-st.session_state.to_send = ""
-
-if prompt:
-    att = current_attachment()
-    st.audio(SEND_SOUND, format="audio/wav", autoplay=True)
-    label = prompt if att is None else f"📎 {att.name}\n{prompt}"
-    ask(prompt, label, league_code, attachment=att)
-    st.session_state.att_n += 1
-    st.rerun()
-elif audio is not None:
-    data = audio.getvalue()
-    h = hashlib.md5(data).hexdigest()
-    if h != st.session_state.last_audio:
-        st.session_state.last_audio = h
-        with st.spinner("Listening..."):
-            heard = transcribe(data)
-        if heard:
-            st.audio(SEND_SOUND, format="audio/wav", autoplay=True)
-            ask(heard, "🎤 " + heard, league_code)
-            st.rerun()
-        else:
-            st.warning("I couldn't hear that clearly. Please record again.")
-
-# ---------- Render history ----------
-if st.session_state.messages:
-    with chat_box:
-        for m in st.session_state.messages:
-            if m["role"] == "table":
-                st.markdown(m["text"], unsafe_allow_html=True)
-                continue
-            safe = html.escape(m["text"]).replace("\n", "<br>")
-            if m["role"] == "user":
-                st.markdown(
-                    f'<div class="row row-user">'
-                    f'<div class="bubble bubble-user">{safe}</div>'
-                    f'<div class="avatar avatar-user">You</div></div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                st.markdown(
-                    f'<div class="row row-bot">'
-                    f'<div class="avatar avatar-bot">MP</div>'
-                    f'<div class="bubble bubble-bot">{safe}</div></div>',
-                    unsafe_allow_html=True,
-                )
-        if st.session_state.get("pending_voice"):
-            st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
-            st.session_state.pending_voice = None
-
-# ---------- Paywall: M-Pesa STK push, with manual payment as the fallback ----------
-if st.session_state.paywall:
-    amount = PACK_SIZE * CREDIT_KSH
-    st.markdown(
-        f'<div class="paycard">'
-        f'<p class="paycard-title">🔓 Unlock more predictions</p>'
-        f'<p class="paycard-price">KSh {amount}</p>'
-        f'<p class="paycard-text">{PACK_SIZE} prediction credits. Enter your M-Pesa number, '
-        f'then enter your PIN on the prompt that appears on your phone.</p>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-    with st.form("stk_pay"):
-        pay_phone = st.text_input("Your M-Pesa number (07... or 2547...)")
-        pay_go = st.form_submit_button(f"💳 Pay KSh {amount} with M-Pesa", use_container_width=True)
-    if pay_go:
-        ok, msg = start_mpesa_payment(st.session_state.user_email, pay_phone)
-        (st.success if ok else st.error)(msg)
-
-    st.caption("Prefer to pay manually? Pay the business details below, send us the M-Pesa receipt, and we will send you an access code.")
-    st.markdown(
-        f"**Pay manually with M-Pesa**\n\n"
-        f"1. Go to **Lipa na M-Pesa → Paybill**\n"
-        f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
-        f"3. Account number: **{ACCOUNT_NUMBER}**\n"
-        f"4. Amount: **KSh {amount}**\n"
-        f"5. Enter your PIN, then enter your access code below."
-    )
-    if PAY_LINK:
-        st.link_button("Open payment form", PAY_LINK, use_container_width=True)
-
-    with st.form("redeem"):
-        code_in = st.text_input("Enter your access code", type="password")
-        redeem_submit = st.form_submit_button("Add credits")
-    if redeem_submit:
-        ok, msg = redeem_code(st.session_state.user_email, code_in)
-        if ok:
-            st.session_state.paywall = False
-            st.rerun()
-        else:
-            st.error(msg)
-
-# ---------- Owner stats (only visible to ADMIN_EMAIL) ----------
-if is_owner(st.session_state.user_email):
-    with st.sidebar.expander("📊 Owner stats"):
-        packs = count_rows("redemptions")
-        st.metric("Visits (all time)", count_events("visit"))
-        st.metric("Visits (last 7 days)", count_events("visit", 7))
-        st.metric("Sign-ups", count_events("signup"))
-        st.metric("Unique people who signed in", count_unique_signins())
-        st.metric("Sign-ins (total)", count_events("signin"))
-        st.metric("Access-code packs sold", packs)
-        st.metric("Credits from access codes", packs * PACK_SIZE)
-        st.metric("Referrals rewarded", count_rows("referrals", rewarded=True))
-        st.metric("Chats started", count_rows("conversations"))
-        ps = prediction_stats()
-        st.metric("Predictions made (all)", ps["total"])
-        st.metric("Checked against results", ps["played"])
-        st.metric("Correct", ps["correct"])
-        st.metric("Wrong", ps["wrong"])
-        st.metric("Awaiting result", ps["pending"])
-        mp = sb.table("mpesa_payments").select("status").execute().data
-        st.metric("M-Pesa pending", sum(1 for r in mp if r["status"] == "pending"))
-        st.metric("M-Pesa paid", sum(1 for r in mp if r["status"] == "paid"))
-        st.metric("M-Pesa failed", sum(1 for r in mp if r["status"] == "failed"))
