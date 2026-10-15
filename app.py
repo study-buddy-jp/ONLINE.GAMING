@@ -67,18 +67,23 @@ def fd_get(path):
     return r.json()
 
 
-# ---------- Login (Google only, no terms or age gate) ----------
-if not st.user.is_logged_in:
+# ---------- Login (typed email, no Google, no terms or age gate) ----------
+if "email" not in st.session_state:
     st.title("⚽ Matchday Prediction")
-    tab_google, = st.tabs(["Sign in with Google"])
-    with tab_google:
-        st.write("Sign in with your Google account to continue.")
-        if st.button("Continue with Google", type="primary"):
-            st.login("google")
+    with st.form("login_form"):
+        email_in = st.text_input("Email")
+        name_in = st.text_input("Name (optional)")
+        if st.form_submit_button("Continue", type="primary"):
+            if "@" not in email_in:
+                st.error("Enter a valid email address.")
+            else:
+                st.session_state.email = email_in.strip().lower()
+                st.session_state.name = name_in.strip() or email_in.strip().lower()
+                st.rerun()
     st.stop()
 
-EMAIL = (st.user.email or "").lower()
-NAME = st.user.name or EMAIL
+EMAIL = st.session_state.email
+NAME = st.session_state.name
 
 
 # ---------- Database helpers ----------
@@ -283,7 +288,8 @@ with st.sidebar:
     st.caption("Predictions are estimates for entertainment. They are not betting advice.")
 
     if st.button("Sign out"):
-        st.logout()
+        st.session_state.clear()
+        st.rerun()
 
 
 # ---------- Main ----------
