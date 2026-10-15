@@ -1,158 +1,344 @@
 import os
-import io
 import re
-import math
-import wave
-import struct
-import html
-import hmac
-import hashlib
-import secrets
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 import requests
 import streamlit as st
 from google import genai
-from google.genai import types
 from supabase import create_client
+
 from model import predict as model_predict
-from mpesa import stk_push, normalise_phone
+from mpesa import normalise_phone, stk_push
 
-def get_secret(name, default=""):
-    value = os.environ.get(name)
-    if value:
-        return value
-    try:
-        return st.secrets[name]
-    except Exception:
-        return default
+st.set_page_config(page_title="Matchday Prediction", page_icon="⚽", layout="centered")
 
-ADMIN_EMAIL = get_secret("ADMIN_EMAIL").strip().lower()
-
-def is_owner(email):
-    return bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
-
-MODEL = "gemini-flash-lite-latest"
-TRANSCRIBE_MODEL = "gemini-flash-latest"
-TTS_MODEL = "gemini-2.5-flash-preview-tts"
-VOICE_NAME = "Kore"
-CHAT_HEIGHT = 340
-REPLY_MODES = ["Text", "Voice", "Both"]
-ATTACH_TYPES = ["png", "jpg", "jpeg", "webp", "pdf"]
-APP_NAME = "Matchday Prediction"
-APP_TITLE = f"⚽ {APP_NAME}"
-APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
-APP_ROLE_TAG = "Match Analyst"
-HISTORY_LIMIT = 20
-PACK_SIZE = 5
-CREDIT_KSH = 20
-REFERRAL_CREDITS = 1
-NEW_CHAT_TITLE = "New chat"
-EAT = timezone(timedelta(hours=3))
-RECENT_N = 8
-H2H_N = 5
-
-LEAGUES = {
-    "Premier League (England)": "PL",
-    "Serie A (Italy)": "SA",
-    "La Liga (Spain)": "PD",
-    "Bundesliga (Germany)": "BL1",
-    "Ligue 1 (France)": "FL1",
+PACK_CREDITS = 5
+PACK_PRICE_KES = 100
+PREDICTION_COST = 1
+GEMINI_MODEL = "gemini-2.5-flash"
+COMPETITIONS = {
+    "Premier League": "PL",
+    "La Liga": "PD",
+    "Serie A": "SA",
+    "Bundesliga": "BL1",
+    "Ligue 1": "FL1",
     "Champions League": "CL",
 }
+TERMS_FILE = Path(__file__).parent / "terms.md"
 
-QUICK_ACTIONS = [
-    ("📅 Upcoming fixtures", "What are the upcoming fixtures in this league?"),
-    ("🏆 League table", "Show me the current table and who is in the top 4."),
-    ("📋 Recent results", "Show the recent results of all leagues."),
-    ("🎯 My predictions", "What were my predictions and their outcomes?"),
-    ("🔥 Best form", "Which teams have the best form right now?"),
-    ("🔮 Predict a match", "Predict Arsenal vs Chelsea"),
-]
+st.markdown(
+    """
+    <style>
+    .block-container {max-width: 780px; padding-top: 1.5rem;}
+    .small-text {font-size: 0.8rem; opacity: 0.8;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-PAID_KEYWORDS = [
-    "predict", "prediction", "probab", "estimate", "chance", "odds",
-    "forecast", "who will win", "who wins", "likely", "win probability", "%",
-    "stronger", "better", "beat", "win",
-]
 
-GENERAL_KEYWORDS = [
-    "table", "fixture", "fixtures", "form", "schedule", "explain",
-    "history", "head to head", "standings",
-]
+def get_secret(name, default=""):
+    try:
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.environ.get(name, default)
 
-TERMS = (Path(__file__).parent / "terms.md").read_text(encoding="utf-8")
 
-st.set_page_config(page_title=APP_NAME, page_icon="⚽", layout="centered")
+@st.cache_resource
+def db():
+    return create_client(get_secret("SUPABASE_URL"), get_secret("SUPABASE_SECRET_KEY"))
 
-st.markdown("""
-<style>
-#MainMenu, footer, header[data-testid="stHeader"] { visibility: hidden; }
-.stApp { background: #EFF6FF; }
-.block-container { max-width: 780px; padding-top: 1rem; padding-bottom: 0.5rem; }
-div[data-testid="stVerticalBlock"] { gap: 0.5rem; }
-div[data-testid="stMarkdownContainer"] p { margin-bottom: 0; }
-div[data-testid="stHorizontalBlock"] {
-    flex-wrap: nowrap !important;
-    align-items: center !important;
-    gap: 0.4rem !important;
-}
-div[data-testid="stHorizontalBlock"] > div[data-testid="stColumn"] { min-width: 0 !important; }
-div[data-testid="stHorizontalBlock"] div[data-testid="stPopover"] button,
-div[data-testid="stHorizontalBlock"] .stButton > button { min-height: 2.5rem; width: 100%; }
-.brand {
-    display: flex; align-items: center; gap: 14px;
-    background: linear-gradient(135deg, #1E40AF 0%, #1D4ED8 100%);
-    border-radius: 16px; padding: 12px 18px; margin-bottom: 6px;
-    box-shadow: 0 4px 14px rgba(29, 78, 216, 0.20);
-}
-.brand-title { color: #FFFFFF; font-size: 1.3rem; font-weight: 700; margin: 0; }
-.brand-sub { color: #DBEAFE; font-size: 0.88rem; margin: 2px 0 0 0; }
-.brand-badge {
-    margin-left: auto; background: #FACC15; color: #422006;
-    font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
-}
-.disclaimer { color: #64748B; font-size: 0.78rem; margin: 2px 0 4px 0; }
-.quick-title { color: #1E3A8A; font-weight: 700; font-size: 0.95rem; margin: 10px 0 4px 0; }
-.hero {
-    background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 16px;
-    padding: 14px 16px; margin: 6px 0 8px 0; box-shadow: 0 2px 8px rgba(29,78,216,0.08);
-}
-.hero h3 { color: #1E3A8A; margin: 0 0 4px 0; font-size: 1.05rem; }
-.hero p { color: #475569; margin: 0; font-size: 0.88rem; line-height: 1.45; }
-.steps { display: flex; gap: 8px; margin: 8px 0 0 0; }
-.step {
-    flex: 1; background: #DBEAFE; border-radius: 12px; padding: 10px;
-    color: #1E3A8A; font-size: 0.8rem; line-height: 1.35;
-}
-.step b { display: block; font-size: 0.9rem; margin-bottom: 2px; }
-.fx {
-    display: flex; justify-content: space-between; align-items: center; gap: 8px;
-    background: #FFFFFF; border: 1px solid #DBEAFE; border-radius: 12px;
-    padding: 8px 12px; margin: 5px 0; font-size: 0.88rem; color: #1E3A8A;
-}
-.fx-date { color: #64748B; font-size: 0.78rem; white-space: nowrap; }
-.dtable-wrap { overflow-x: auto; background: #FFFFFF; border-radius: 12px; padding: 6px; margin: 6px 0; border: 1px solid #BFDBFE; }
-.dtable { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-.dtable th { background: #1D4ED8; color: #FFFFFF; padding: 6px 4px; text-align: center; white-space: nowrap; }
-.dtable td { padding: 6px 4px; text-align: center; color: #1E3A8A; border-bottom: 1px solid #DBEAFE; white-space: nowrap; }
-.dtable td.name { text-align: left; font-weight: 600; }
-.dtable tr:nth-child(even) td { background: #F8FBFF; }
-.tcard {
-    background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 14px;
-    padding: 12px 14px; margin: 8px 0; box-shadow: 0 2px 6px rgba(29,78,216,0.06);
-}
-.tcard-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
-.tcard-name { color: #1E3A8A; font-weight: 700; font-size: 1rem; }
-.tcard-badge { background: #DBEAFE; color: #1E3A8A; font-size: 0.72rem; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-.tcard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 10px; margin-top: 8px; font-size: 0.82rem; color: #334155; }
-.tcard-grid b { color: #1E3A8A; }
-.tcard-form { margin-top: 8px; font-size: 0.82rem; color: #334155; }
-.tcard-form span { display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center; border-radius: 6px; color: #FFFFFF; font-weight: 700; font-size: 0.72rem; margin-right: 3px; }
-.f-w { background: #16A34A; } .f-d { background: #94A3B8; } .f-l { background: #DC2626; }
-.pbox { background: #FFFFFF; border: 1px solid #BFDBFE; border-radius: 14px; padding: 12px 14px; margin: 8px 0; font-size: 0.86rem; color: #334155; line-height: 1.6; }
-.pbox-title { color: #1E3A8A; font-weight: 700; margin-bottom: 6px; }
-.pbox b { color: #1E3A8A; }
-.pbar-row { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 0.84rem; color: #1E3A8A; }
-.pbar-row span { width: 110px; flex-shrink: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pbar { flex: 1; background: #DBEAFE; border-radius: 999px;
+
+@st.cache_resource
+def gemini():
+    return genai.Client(api_key=get_secret("GEMINI_API_KEY"))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def fd_get(path):
+    r = requests.get(
+        f"https://api.football-data.org/v4/{path}",
+        headers={"X-Auth-Token": get_secret("FOOTBALL_API_KEY")},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+# ---------- Login gate (Google only, no terms or age gate) ----------
+if not st.user.is_logged_in:
+    st.title("⚽ Matchday Prediction")
+    st.write("Sign in to see fixtures, tables and match predictions.")
+    if st.button("Continue with Google", type="primary"):
+        st.login("google")
+    st.stop()
+
+EMAIL = (st.user.email or "").lower()
+NAME = st.user.name or EMAIL
+
+
+# ---------- Database helpers ----------
+def ensure_account(email, name):
+    sb = db()
+    sb.table("users").upsert({"email": email, "name": name}, on_conflict="email").execute()
+    sb.table("wallet").upsert(
+        {"email": email, "credits": 0}, on_conflict="email", ignore_duplicates=True
+    ).execute()
+
+
+def get_balance(email):
+    r = db().table("wallet").select("credits").eq("email", email).execute()
+    return r.data[0]["credits"] if r.data else 0
+
+
+def change_credits(email, delta, reason):
+    sb = db()
+    new_balance = get_balance(email) + delta
+    sb.table("wallet").update({"credits": new_balance}).eq("email", email).execute()
+    sb.table("ledger").insert({"email": email, "delta": delta, "reason": reason}).execute()
+
+
+if not st.session_state.get("account_ready"):
+    try:
+        ensure_account(EMAIL, NAME)
+        st.session_state.account_ready = True
+    except Exception as e:
+        st.error(f"Could not load your account: {e}")
+        st.stop()
+
+
+# ---------- Payments and access codes ----------
+def start_payment(phone):
+    try:
+        msisdn = normalise_phone(phone)
+    except Exception:
+        st.error("Enter a valid Safaricom number, e.g. 0712345678.")
+        return
+    try:
+        resp = stk_push(msisdn, PACK_PRICE_KES, f"Credits {PACK_CREDITS}")
+    except Exception as e:
+        st.error(f"Could not start M-Pesa payment: {e}")
+        return
+    checkout_id = resp.get("CheckoutRequestID")
+    if not checkout_id:
+        st.error(resp.get("errorMessage") or "M-Pesa did not accept the request. Try again.")
+        return
+    db().table("mpesa_payments").insert(
+        {
+            "checkout_request_id": checkout_id,
+            "email": EMAIL,
+            "amount": PACK_PRICE_KES,
+            "status": "pending",
+        }
+    ).execute()
+    st.info("Enter your M-Pesa PIN on your phone. Credits are added automatically once payment is confirmed.")
+
+
+def redeem_code(code):
+    codes = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
+    if code not in codes:
+        st.error("That access code is not valid.")
+        return
+    sb = db()
+    used = sb.table("redemptions").select("code").eq("code", code).execute()
+    if used.data:
+        st.error("That access code has already been used.")
+        return
+    sb.table("redemptions").insert({"code": code, "email": EMAIL}).execute()
+    change_credits(EMAIL, PACK_CREDITS, "access code")
+    st.success(f"Added {PACK_CREDITS} credits.")
+
+
+# ---------- Football data helpers ----------
+@st.cache_data(ttl=600, show_spinner=False)
+def load_matches(code):
+    return fd_get(f"competitions/{code}/matches")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_table(code):
+    return fd_get(f"competitions/{code}/standings")
+
+
+def teams_from(matches):
+    teams = {}
+    for m in matches:
+        for side in ("homeTeam", "awayTeam"):
+            t = m.get(side) or {}
+            if t.get("id"):
+                teams[t["id"]] = {
+                    "id": t["id"],
+                    "name": t.get("name", ""),
+                    "short": t.get("shortName", "") or "",
+                    "tla": t.get("tla", "") or "",
+                }
+    return list(teams.values())
+
+
+def find_team(query, teams):
+    q = query.strip().lower()
+    if not q:
+        return None
+    for t in teams:
+        if q in (t["name"].lower(), t["short"].lower(), t["tla"].lower()):
+            return t
+    for t in teams:
+        if q in t["name"].lower() or q in t["short"].lower():
+            return t
+    return None
+
+
+def explain(home, away, figures):
+    prompt = (
+        f"Write a short, friendly match preview of {home} vs {away} for a football fan. "
+        f"Model probabilities: {home} win {figures['p_home']:.0%}, draw {figures['p_draw']:.0%}, "
+        f"{away} win {figures['p_away']:.0%}. Use these exact figures, explain the reasons "
+        f"in plain language, and do not promise a result or suggest betting."
+    )
+    try:
+        resp = gemini().models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        return resp.text
+    except Exception as e:
+        return f"(Explanation unavailable right now: {e})"
+
+
+def run_prediction(text, code):
+    m = re.match(r"^\s*(.+?)\s+(?:vs\.?|v)\s+(.+?)\s*$", text, re.IGNORECASE)
+    if not m:
+        st.warning("Use the format: Team A vs Team B")
+        return
+    try:
+        data = load_matches(code)
+    except Exception as e:
+        st.error(f"Could not load fixtures: {e}")
+        return
+    matches = data.get("matches", [])
+    teams = teams_from(matches)
+    home = find_team(m.group(1), teams)
+    away = find_team(m.group(2), teams)
+    if not home or not away:
+        st.warning("I could not find both teams in this league.")
+        return
+    if get_balance(EMAIL) < PREDICTION_COST:
+        st.error("You need credits to predict. Buy a pack or redeem an access code.")
+        return
+    finished = [x for x in matches if x.get("status") == "FINISHED"]
+    figures = model_predict(finished, home["id"], away["id"])
+    if figures is None:
+        st.info("Not enough match history for one of these teams yet. No credit was charged.")
+        return
+
+    change_credits(EMAIL, -PREDICTION_COST, "prediction")
+    db().table("predictions").insert(
+        {
+            "email": EMAIL,
+            "home": home["name"],
+            "away": away["name"],
+            "p_home": figures["p_home"],
+            "p_draw": figures["p_draw"],
+            "p_away": figures["p_away"],
+        }
+    ).execute()
+
+    st.subheader(f"{home['name']} vs {away['name']}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric(f"{home['short'] or home['name']} win", f"{figures['p_home']:.0%}")
+    c2.metric("Draw", f"{figures['p_draw']:.0%}")
+    c3.metric(f"{away['short'] or away['name']} win", f"{figures['p_away']:.0%}")
+    st.write(explain(home["name"], away["name"], figures))
+
+
+# ---------- Sidebar ----------
+with st.sidebar:
+    st.header("Account")
+    st.caption(f"{NAME}\n\n{EMAIL}")
+    try:
+        balance = get_balance(EMAIL)
+    except Exception:
+        balance = 0
+    st.metric("Credits", balance)
+    st.caption(f"1 prediction = {PREDICTION_COST} credit")
+
+    st.subheader(f"Buy {PACK_CREDITS} credits")
+    st.caption(f"KSh {PACK_PRICE_KES} via M-Pesa")
+    with st.form("buy_pack"):
+        phone = st.text_input("M-Pesa phone number", placeholder="0712345678")
+        if st.form_submit_button(f"Pay KSh {PACK_PRICE_KES}"):
+            start_payment(phone)
+
+    with st.form("redeem"):
+        code = st.text_input("Access code")
+        if st.form_submit_button("Redeem"):
+            redeem_code(code.strip())
+
+    with st.expander("Terms"):
+        if TERMS_FILE.exists():
+            st.markdown(TERMS_FILE.read_text(encoding="utf-8"))
+        else:
+            st.write("Terms are not available.")
+    st.caption("Predictions are estimates for entertainment. They are not betting advice.")
+
+    if st.button("Sign out"):
+        st.logout()
+
+
+# ---------- Main ----------
+st.title("⚽ Matchday Prediction")
+league = st.selectbox("League", list(COMPETITIONS.keys()))
+code = COMPETITIONS[league]
+
+tab_predict, tab_fixtures, tab_table = st.tabs(["Predict", "Fixtures", "Table"])
+
+with tab_predict:
+    st.write("Type a match, for example **Arsenal vs Chelsea**. Each prediction uses 1 credit.")
+    with st.form("predict_form"):
+        match_text = st.text_input("Match", placeholder="Arsenal vs Chelsea")
+        submitted = st.form_submit_button("Predict", type="primary")
+    if submitted:
+        run_prediction(match_text, code)
+
+with tab_fixtures:
+    try:
+        matches = load_matches(code).get("matches", [])
+        upcoming = [x for x in matches if x.get("status") in ("SCHEDULED", "TIMED")][:20]
+        recent = [x for x in matches if x.get("status") == "FINISHED"][-10:]
+        st.subheader("Upcoming")
+        if not upcoming:
+            st.write("No upcoming fixtures.")
+        for x in upcoming:
+            when = (x.get("utcDate") or "")[:16].replace("T", " ")
+            st.write(f"{when} UTC · {x['homeTeam']['name']} vs {x['awayTeam']['name']}")
+        st.subheader("Recent results")
+        for x in reversed(recent):
+            score = x.get("score", {}).get("fullTime", {})
+            st.write(
+                f"{x['homeTeam']['name']} {score.get('home')} - {score.get('away')} {x['awayTeam']['name']}"
+            )
+    except Exception as e:
+        st.error(f"Could not load fixtures: {e}")
+
+with tab_table:
+    try:
+        standings = load_table(code).get("standings", [])
+        rows = standings[0].get("table", []) if standings else []
+        st.dataframe(
+            [
+                {
+                    "Pos": r.get("position"),
+                    "Team": r.get("team", {}).get("name"),
+                    "P": r.get("playedGames"),
+                    "W": r.get("won"),
+                    "D": r.get("draw"),
+                    "L": r.get("lost"),
+                    "GD": r.get("goalDifference"),
+                    "Pts": r.get("points"),
+                }
+                for r in rows
+            ],
+            hide_index=True,
+            use_container_width=True,
+        )
+    except Exception as e:
+        st.error(f"Could not load the table: {e}")
