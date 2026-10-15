@@ -264,6 +264,12 @@ if sb is None:
     st.error("The app is not set up yet (database secrets missing).")
     st.stop()
 
+# Payment details, set in Streamlit secrets. Use the BUSINESS paybill and account, never a personal one.
+PAY_LINK = get_secret("PAY_LINK")
+PAY_PRICE = get_secret("PAY_PRICE", "100")
+PAYBILL_NUMBER = get_secret("PAYBILL_NUMBER", "not set")
+ACCOUNT_NUMBER = get_secret("ACCOUNT_NUMBER", "not set")
+
 def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -542,6 +548,22 @@ def reward_referrer(email):
         "credits": get_credits(referrer) + REFERRAL_CREDITS,
     }).execute()
     ledger_add(referrer, "referral", REFERRAL_CREDITS, "Friend's first pack")
+
+def redeem_code(email, code):
+    code = code.strip()
+    if code not in CODES:
+        return False, "That code is not valid. Check it and try again."
+    if sb.table("redemptions").select("code").eq("code", code).execute().data:
+        return False, "That code has already been used."
+    try:
+        # The primary key on code makes this insert fail if two people redeem at once
+        sb.table("redemptions").insert({"code": code, "email": email, "created": now_iso()}).execute()
+    except Exception:
+        return False, "That code has already been used."
+    sb.table("wallet").upsert({"email": email, "credits": get_credits(email) + PACK_SIZE}).execute()
+    ledger_add(email, "top_up", PACK_SIZE, "Access code pack")
+    reward_referrer(email)
+    return True, f"{PACK_SIZE} prediction credits added (KSh {PACK_SIZE * CREDIT_KSH})."
 
 # ---------- Step 1: terms ----------
 if not st.session_state.accepted_terms:
@@ -1663,7 +1685,7 @@ if st.session_state.messages:
             st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
             st.session_state.pending_voice = None
 
-# ---------- Paywall: M-Pesa STK push only ----------
+# ---------- Paywall: M-Pesa STK push, with manual payment as the fallback ----------
 if st.session_state.paywall:
     amount = PACK_SIZE * CREDIT_KSH
     st.markdown(
@@ -1682,6 +1704,29 @@ if st.session_state.paywall:
         ok, msg = start_mpesa_payment(st.session_state.user_email, pay_phone)
         (st.success if ok else st.error)(msg)
 
+    st.caption("Prefer to pay manually? Pay the business details below, send us the M-Pesa receipt, and we will send you an access code.")
+    st.markdown(
+        f"**Pay manually with M-Pesa**\n\n"
+        f"1. Go to **Lipa na M-Pesa → Paybill**\n"
+        f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
+        f"3. Account number: **{ACCOUNT_NUMBER}**\n"
+        f"4. Amount: **KSh {amount}**\n"
+        f"5. Enter your PIN, then enter your access code below."
+    )
+    if PAY_LINK:
+        st.link_button("Open payment form", PAY_LINK, use_container_width=True)
+
+    with st.form("redeem"):
+        code_in = st.text_input("Enter your access code", type="password")
+        redeem_submit = st.form_submit_button("Add credits")
+    if redeem_submit:
+        ok, msg = redeem_code(st.session_state.user_email, code_in)
+        if ok:
+            st.session_state.paywall = False
+            st.rerun()
+        else:
+            st.error(msg)
+
 # ---------- Owner stats (only visible to ADMIN_EMAIL) ----------
 if is_owner(st.session_state.user_email):
     with st.sidebar.expander("📊 Owner stats"):
@@ -1691,7 +1736,8 @@ if is_owner(st.session_state.user_email):
         st.metric("Sign-ups", count_events("signup"))
         st.metric("Unique people who signed in", count_unique_signins())
         st.metric("Sign-ins (total)", count_events("signin"))
-        st.metric("Credits sold", count_rows("wallet") and 0)
+        st.metric("Access-code packs sold", packs)
+        st.metric("Credits from access codes", packs * PACK_SIZE)
         st.metric("Referrals rewarded", count_rows("referrals", rewarded=True))
         st.metric("Chats started", count_rows("conversations"))
         ps = prediction_stats()
@@ -1700,3 +1746,7 @@ if is_owner(st.session_state.user_email):
         st.metric("Correct", ps["correct"])
         st.metric("Wrong", ps["wrong"])
         st.metric("Awaiting result", ps["pending"])
+        mp = sb.table("mpesa_payments").select("status").execute().data
+        st.metric("M-Pesa pending", sum(1 for r in mp if r["status"] == "pending"))
+        st.metric("M-Pesa paid", sum(1 for r in mp if r["status"] == "paid"))
+        st.metric("M-Pesa failed", sum(1 for r in mp if r["status"] == "failed"))
