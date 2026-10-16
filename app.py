@@ -8,7 +8,6 @@ from google import genai
 from supabase import create_client
 
 from model import predict as model_predict
-from mpesa import normalise_phone, stk_push
 
 st.set_page_config(page_title="Matchday Prediction", page_icon="⚽", layout="centered")
 
@@ -24,13 +23,16 @@ COMPETITIONS = {
     "Ligue 1": "FL1",
     "Champions League": "CL",
 }
+PREDICT_WORDS = ("predict", "prediction", "who will win", "chances", "probability")
+TABLE_WORDS = ("table", "standings", "position")
+FIXTURE_WORDS = ("fixture", "upcoming", "next match", "schedule")
+RESULT_WORDS = ("result", "score", "latest")
 TERMS_FILE = Path(__file__).parent / "terms.md"
 
 st.markdown(
     """
     <style>
     .block-container {max-width: 780px; padding-top: 1.5rem;}
-    .small-text {font-size: 0.8rem; opacity: 0.8;}
     </style>
     """,
     unsafe_allow_html=True,
@@ -67,6 +69,16 @@ def fd_get(path):
     return r.json()
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_matches(code):
+    return fd_get(f"competitions/{code}/matches")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_table(code):
+    return fd_get(f"competitions/{code}/standings")
+
+
 # ---------- Login (typed email, no Google, no terms or age gate) ----------
 if "email" not in st.session_state:
     st.title("⚽ Matchday Prediction")
@@ -84,10 +96,11 @@ if "email" not in st.session_state:
 
 EMAIL = st.session_state.email
 NAME = st.session_state.name
+IS_OWNER = bool(get_secret("ADMIN_EMAIL")) and EMAIL == get_secret("ADMIN_EMAIL").strip().lower()
 
 
 # ---------- Database helpers ----------
-def ensure_account(email, name):
+def ensure_account(email):
     sb = db()
     sb.table("users").upsert({"email": email}, on_conflict="email").execute()
     sb.table("wallet").upsert(
@@ -109,47 +122,14 @@ def change_credits(email, delta, reason):
 
 if not st.session_state.get("account_ready"):
     try:
-        ensure_account(EMAIL, NAME)
+        ensure_account(EMAIL)
         st.session_state.account_ready = True
     except Exception as e:
         st.error(f"Could not load your account: {e}")
         st.stop()
 
 
-# ---------- Payments and access codes ----------
-def start_payment(phone):
-    try:
-        msisdn = normalise_phone(phone)
-    except Exception:
-        st.error("Enter a valid Safaricom number, e.g. 0712345678.")
-        return
-    try:
-        resp = stk_push(
-            shortcode=get_secret("DARAJA_SHORTCODE"),
-            passkey=get_secret("DARAJA_PASSKEY"),
-            callback_url=get_secret("DARAJA_CALLBACK_URL"),
-            phone=msisdn,
-            amount=PACK_PRICE_KES,
-            account_ref=f"CREDITS{PACK_CREDITS}",
-        )
-    except Exception as e:
-        st.error(f"Could not start M-Pesa payment: {e}")
-        return
-    checkout_id = resp.get("CheckoutRequestID")
-    if not checkout_id:
-        st.error(resp.get("errorMessage") or "M-Pesa did not accept the request. Try again.")
-        return
-    db().table("mpesa_payments").insert(
-        {
-            "checkout_request_id": checkout_id,
-            "email": EMAIL,
-            "amount": PACK_PRICE_KES,
-            "status": "pending",
-        }
-    ).execute()
-    st.info("Enter your M-Pesa PIN on your phone. Credits are added automatically once payment is confirmed.")
-
-
+# ---------- Manual PayBill and access codes ----------
 def redeem_code(code):
     codes = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
     if code not in codes:
@@ -169,45 +149,49 @@ def manual_payment_steps():
     paybill = get_secret("PAYBILL_NUMBER")
     account = get_secret("ACCOUNT_NUMBER")
     if not paybill or not account:
-        st.info("Manual payment is not set up yet.")
+        st.info("Payment details are not set up yet. Please check back soon.")
         return
     st.markdown(
         f"""
-**Pay manually with M-Pesa**
+**Buy {PACK_CREDITS} credits for KSh {PACK_PRICE_KES}**
 
 1. Go to **M-Pesa → Lipa na M-Pesa → Pay Bill**
 2. Business number: **{paybill}**
 3. Account number: **{account}**
 4. Amount: **KSh {PACK_PRICE_KES}**
 5. Enter your M-Pesa PIN and confirm.
-6. Copy the M-Pesa confirmation code from the SMS and send it to us with your email. Credits are added after we check the payment.
+6. Send us the M-Pesa confirmation code and your email. Credits are added after we check the payment.
 """
     )
 
 
-def paywall_forms(suffix):
-    """Payment and access-code forms. Use a different suffix for each place on the page."""
-    with st.form(f"buy_pack_{suffix}"):
-        phone = st.text_input("M-Pesa phone number", placeholder="0712345678", key=f"phone_{suffix}")
-        if st.form_submit_button(f"Pay KSh {PACK_PRICE_KES} for {PACK_CREDITS} credits"):
-            start_payment(phone)
+def payment_panel(suffix):
+    """PayBill steps plus the access-code form. Use a different suffix for each place on the page."""
+    manual_payment_steps()
     with st.form(f"redeem_{suffix}"):
         code_in = st.text_input("Or enter an access code", key=f"code_{suffix}")
         if st.form_submit_button("Redeem code"):
             redeem_code(code_in.strip())
 
 
-# ---------- Football data helpers ----------
-@st.cache_data(ttl=600, show_spinner=False)
-def load_matches(code):
-    return fd_get(f"competitions/{code}/matches")
+def owner_credit(buyer, ref, packs):
+    buyer = buyer.strip().lower()
+    ref = ref.strip().upper()
+    if "@" not in buyer or not ref:
+        st.error("Enter the buyer's email and the M-Pesa confirmation code.")
+        return
+    sb = db()
+    marker = f"MPESA:{ref}"
+    if sb.table("redemptions").select("code").eq("code", marker).execute().data:
+        st.error(f"Code {ref} has already been credited.")
+        return
+    ensure_account(buyer)
+    change_credits(buyer, int(packs) * PACK_CREDITS, f"PayBill {ref}")
+    sb.table("redemptions").insert({"code": marker, "email": buyer}).execute()
+    st.success(f"Added {int(packs) * PACK_CREDITS} credits to {buyer}.")
 
 
-@st.cache_data(ttl=600, show_spinner=False)
-def load_table(code):
-    return fd_get(f"competitions/{code}/standings")
-
-
+# ---------- Football helpers ----------
 def teams_from(matches):
     teams = {}
     for m in matches:
@@ -236,47 +220,97 @@ def find_team(query, teams):
     return None
 
 
-def explain(home, away, figures):
+def detect_league(lower):
+    for name, code in COMPETITIONS.items():
+        if name.lower() in lower:
+            return code
+    return "PL"
+
+
+def table_text(code):
+    try:
+        standings = load_table(code).get("standings", [])
+        rows = standings[0].get("table", []) if standings else []
+        lines = [
+            f"{r['position']}. {r['team']['name']} · {r['playedGames']} played · {r['points']} pts"
+            for r in rows
+        ]
+        return "**Table**\n\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Could not load the table: {e}"
+
+
+def fixtures_text(code):
+    try:
+        matches = load_matches(code).get("matches", [])
+        upcoming = [x for x in matches if x.get("status") in ("SCHEDULED", "TIMED")][:10]
+        if not upcoming:
+            return "No upcoming fixtures found."
+        lines = [
+            f"{(x.get('utcDate') or '')[:16].replace('T', ' ')} UTC · {x['homeTeam']['name']} vs {x['awayTeam']['name']}"
+            for x in upcoming
+        ]
+        return "**Upcoming fixtures**\n\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Could not load fixtures: {e}"
+
+
+def results_text(code):
+    try:
+        matches = load_matches(code).get("matches", [])
+        recent = [x for x in matches if x.get("status") == "FINISHED"][-10:]
+        if not recent:
+            return "No recent results found."
+        lines = []
+        for x in reversed(recent):
+            s = x.get("score", {}).get("fullTime", {})
+            lines.append(f"{x['homeTeam']['name']} {s.get('home')} - {s.get('away')} {x['awayTeam']['name']}")
+        return "**Recent results**\n\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Could not load results: {e}"
+
+
+def chat_reply(text):
+    history = st.session_state.messages[-6:]
+    convo = "\n".join(f"{m['role']}: {m['content']}" for m in history)
     prompt = (
-        f"Write a short, friendly match preview of {home} vs {away} for a football fan. "
-        f"Model probabilities: {home} win {figures['p_home']:.0%}, draw {figures['p_draw']:.0%}, "
-        f"{away} win {figures['p_away']:.0%}. Use these exact figures, explain the reasons "
-        f"in plain language, and do not promise a result or suggest betting."
+        "You are the football assistant in the Matchday Prediction app. Chat freely about football. "
+        "Do not give match predictions or odds here. Keep answers short.\n\n"
+        f"Conversation so far:\n{convo}\nuser: {text}"
     )
     try:
-        resp = gemini().models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        return resp.text
+        return gemini().models.generate_content(model=GEMINI_MODEL, contents=prompt).text
     except Exception as e:
-        return f"(Explanation unavailable right now: {e})"
+        return f"Sorry, I could not answer that right now ({e})."
 
 
-def run_prediction(text, code):
-    m = re.match(r"^\s*(.+?)\s+(?:vs\.?|v)\s+(.+?)\s*$", text, re.IGNORECASE)
+def prediction_text(text, balance):
+    m = re.match(r"^\s*(?:predict\s+)?(.+?)\s+(?:vs\.?|v)\s+(.+?)\s*$", text, re.IGNORECASE)
     if not m:
-        st.warning("Use the format: Team A vs Team B")
-        return
+        return "Type the match like this: **predict Arsenal vs Chelsea**."
+    code = detect_league(text.lower())
     try:
-        data = load_matches(code)
+        matches = load_matches(code).get("matches", [])
     except Exception as e:
-        st.error(f"Could not load fixtures: {e}")
-        return
-    matches = data.get("matches", [])
+        return f"Could not load fixtures: {e}"
     teams = teams_from(matches)
     home = find_team(m.group(1), teams)
     away = find_team(m.group(2), teams)
     if not home or not away:
-        st.warning("I could not find both teams in this league.")
-        return
-    if get_balance(EMAIL) < PREDICTION_COST:
-        st.warning("You are out of credits. Buy a pack or enter an access code below.")
-        return
+        return "I could not find both teams in that league. Check the spelling, or mention the league."
+    if balance < PREDICTION_COST:
+        st.session_state.wants_predict = True
+        return (
+            f"A prediction costs {PREDICTION_COST} credit and you have {balance}. "
+            f"Buy a pack below or enter an access code, then ask again."
+        )
     finished = [x for x in matches if x.get("status") == "FINISHED"]
     figures = model_predict(finished, home["id"], away["id"])
     if figures is None:
-        st.info("Not enough match history for one of these teams yet. No credit was charged.")
-        return
+        return "Not enough match history for one of these teams yet. No credit was charged."
 
     change_credits(EMAIL, -PREDICTION_COST, "prediction")
+    st.session_state.wants_predict = False
     db().table("predictions").insert(
         {
             "email": EMAIL,
@@ -287,29 +321,67 @@ def run_prediction(text, code):
             "p_away": figures["p_away"],
         }
     ).execute()
+    try:
+        resp = gemini().models.generate_content(
+            model=GEMINI_MODEL,
+            contents=(
+                f"Write a short, friendly preview of {home['name']} vs {away['name']}. "
+                f"Use these exact figures: {home['name']} win {figures['p_home']:.0%}, "
+                f"draw {figures['p_draw']:.0%}, {away['name']} win {figures['p_away']:.0%}. "
+                "Explain the reasons in plain language. Do not promise a result or suggest betting."
+            ),
+        )
+        explanation = resp.text
+    except Exception as e:
+        explanation = f"(Explanation unavailable right now: {e})"
+    return (
+        f"**{home['name']} vs {away['name']}**\n\n"
+        f"- {home['name']} win: **{figures['p_home']:.0%}**\n"
+        f"- Draw: **{figures['p_draw']:.0%}**\n"
+        f"- {away['name']} win: **{figures['p_away']:.0%}**\n\n"
+        f"{explanation}\n\n_1 credit used._"
+    )
 
-    st.subheader(f"{home['name']} vs {away['name']}")
-    c1, c2, c3 = st.columns(3)
-    c1.metric(f"{home['short'] or home['name']} win", f"{figures['p_home']:.0%}")
-    c2.metric("Draw", f"{figures['p_draw']:.0%}")
-    c3.metric(f"{away['short'] or away['name']} win", f"{figures['p_away']:.0%}")
-    st.write(explain(home["name"], away["name"], figures))
+
+def answer(text, balance):
+    lower = text.lower()
+    code = detect_league(lower)
+    if any(w in lower for w in PREDICT_WORDS):
+        return prediction_text(text, balance)
+    if any(w in lower for w in TABLE_WORDS):
+        return table_text(code)
+    if any(w in lower for w in FIXTURE_WORDS):
+        return fixtures_text(code)
+    if any(w in lower for w in RESULT_WORDS):
+        return results_text(code)
+    return chat_reply(text)
+
+
+# ---------- Load balance ----------
+try:
+    balance = get_balance(EMAIL)
+except Exception:
+    balance = 0
 
 
 # ---------- Sidebar ----------
 with st.sidebar:
     st.header("Account")
     st.caption(f"{NAME}\n\n{EMAIL}")
-    try:
-        balance = get_balance(EMAIL)
-    except Exception:
-        balance = 0
     st.metric("Credits", balance)
     st.caption(f"1 prediction = {PREDICTION_COST} credit")
-
     st.subheader("Buy credits")
     st.caption(f"{PACK_CREDITS} credits for KSh {PACK_PRICE_KES}")
-    paywall_forms("side")
+    payment_panel("side")
+
+    if IS_OWNER:
+        with st.expander("Owner: credit a PayBill payment"):
+            with st.form("owner_credit_form"):
+                buyer_in = st.text_input("Buyer's email")
+                ref_in = st.text_input("M-Pesa confirmation code")
+                packs_in = st.number_input("Packs (KSh 100 each)", min_value=1, max_value=20, value=1, step=1)
+                if st.form_submit_button("Add credits"):
+                    owner_credit(buyer_in, ref_in, packs_in)
 
     with st.expander("Terms"):
         if TERMS_FILE.exists():
@@ -317,83 +389,31 @@ with st.sidebar:
         else:
             st.write("Terms are not available.")
     st.caption("Predictions are estimates for entertainment. They are not betting advice.")
-
     if st.button("Sign out"):
         st.session_state.clear()
         st.rerun()
 
 
-# ---------- Main ----------
+# ---------- Chat ----------
 st.title("⚽ Matchday Prediction")
-league = st.selectbox("League", list(COMPETITIONS.keys()))
-code = COMPETITIONS[league]
 
-tab_predict, tab_fixtures, tab_table = st.tabs(["Predict", "Fixtures", "Table"])
+if "messages" not in st.session_state:
+    st.session_state.messages = [
+        {"role": "assistant", "content": f"Hi {NAME}! Ask me anything about football."}
+    ]
 
-with tab_predict:
-    try:
-        current_balance = get_balance(EMAIL)
-    except Exception:
-        current_balance = 0
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-    if current_balance < PREDICTION_COST:
-        st.warning(
-            f"You have {current_balance} credits. A prediction needs {PREDICTION_COST}. "
-            f"Pay below to get {PACK_CREDITS} credits, or enter an access code."
-        )
-        manual_payment_steps()
-        paywall_forms("main")
-    else:
-        st.write(
-            f"Type a match, for example **Arsenal vs Chelsea**. "
-            f"Each prediction uses {PREDICTION_COST} credit. You have {current_balance}."
-        )
-        with st.form("predict_form"):
-            match_text = st.text_input("Match", placeholder="Arsenal vs Chelsea")
-            submitted = st.form_submit_button("Predict", type="primary")
-        if submitted:
-            run_prediction(match_text, code)
+if st.session_state.get("wants_predict") and balance < PREDICTION_COST:
+    with st.container(border=True):
+        st.warning(f"You have {balance} credits. A prediction needs {PREDICTION_COST}.")
+        payment_panel("main")
 
-with tab_fixtures:
-    try:
-        matches = load_matches(code).get("matches", [])
-        upcoming = [x for x in matches if x.get("status") in ("SCHEDULED", "TIMED")][:20]
-        recent = [x for x in matches if x.get("status") == "FINISHED"][-10:]
-        st.subheader("Upcoming")
-        if not upcoming:
-            st.write("No upcoming fixtures.")
-        for x in upcoming:
-            when = (x.get("utcDate") or "")[:16].replace("T", " ")
-            st.write(f"{when} UTC · {x['homeTeam']['name']} vs {x['awayTeam']['name']}")
-        st.subheader("Recent results")
-        for x in reversed(recent):
-            score = x.get("score", {}).get("fullTime", {})
-            st.write(
-                f"{x['homeTeam']['name']} {score.get('home')} - {score.get('away')} {x['awayTeam']['name']}"
-            )
-    except Exception as e:
-        st.error(f"Could not load fixtures: {e}")
-
-with tab_table:
-    try:
-        standings = load_table(code).get("standings", [])
-        rows = standings[0].get("table", []) if standings else []
-        st.dataframe(
-            [
-                {
-                    "Pos": r.get("position"),
-                    "Team": r.get("team", {}).get("name"),
-                    "P": r.get("playedGames"),
-                    "W": r.get("won"),
-                    "D": r.get("draw"),
-                    "L": r.get("lost"),
-                    "GD": r.get("goalDifference"),
-                    "Pts": r.get("points"),
-                }
-                for r in rows
-            ],
-            hide_index=True,
-            use_container_width=True,
-        )
-    except Exception as e:
-        st.error(f"Could not load the table: {e}")
+prompt = st.chat_input("Ask about football")
+if prompt:
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    reply = answer(prompt, balance)
+    st.session_state.messages.append({"role": "assistant", "content": reply})
+    st.rerun()
