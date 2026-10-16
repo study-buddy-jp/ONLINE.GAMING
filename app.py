@@ -966,6 +966,104 @@ def head_to_head(home_id, away_id, home_name, away_name):
 def match_context(code):
     return fixtures_context(code) + "\n\n" + table_context(code)
 
+@st.cache_data(ttl=3600)
+def top_scorers(code, _key):
+    """Top goalscorers in a competition. Cached for an hour. Empty list if unavailable."""
+    if not _key:
+        return []
+    try:
+        r = requests.get(
+            f"https://api.football-data.org/v4/competitions/{code}/scorers",
+            headers={"X-Auth-Token": _key},
+            params={"limit": 50},
+            timeout=10,
+        )
+        if r.status_code != 200:
+            return []
+        return r.json().get("scorers", [])
+    except Exception:
+        return []
+
+def team_games(team_id, league_code, n=10):
+    """Last n finished games in this competition, newest first.
+    Each entry: (is_home, goals_for, goals_against, utcDate)."""
+    out = []
+    for g in team_finished(team_id, FOOTBALL_KEY) or []:
+        ft = (g.get("score") or {}).get("fullTime") or {}
+        if ft.get("home") is None or ft.get("away") is None:
+            continue
+        if g.get("competition", {}).get("code") != league_code and league_code != "CL":
+            continue
+        is_home = g["homeTeam"]["id"] == team_id
+        mine = ft["home"] if is_home else ft["away"]
+        theirs = ft["away"] if is_home else ft["home"]
+        out.append((is_home, mine, theirs, g["utcDate"]))
+    return out[:n]
+
+def team_extras(code, team_id, team_name):
+    """Extra facts for one team: table position, top scorers, weighted form,
+    clean sheets split home and away, and recent workload. Only lines the data provides."""
+    lines = []
+
+    table, _ = league_table(code, FOOTBALL_KEY)
+    row = next((r for r in (table or []) if r["team"]["id"] == team_id), None)
+    if row and code != "CL" and len(table) >= 8:
+        line = f"  Table: {row['position']} of {len(table)}, {row['points']} pts"
+        if len(table) >= 4:
+            gap = row["points"] - table[3]["points"]
+            line += f", {gap:+d} pts against 4th place"
+        lines.append(line)
+
+    scorers = [s for s in top_scorers(code, FOOTBALL_KEY)
+               if (s.get("team") or {}).get("id") == team_id]
+    if scorers:
+        top = ", ".join(f"{s['player']['name']} {s.get('goals', 0)}" for s in scorers[:2])
+        lines.append(f"  Top scorers this season: {top}")
+
+    lg = team_games(team_id, code, n=5)
+    if lg:
+        weights = [5, 4, 3, 2, 1][:len(lg)]
+        pts = [3 if mine > theirs else 1 if mine == theirs else 0 for _, mine, theirs, _ in lg]
+        wpg = sum(w * p for w, p in zip(weights, pts)) / sum(weights)
+        lines.append(f"  Weighted form (last {len(lg)}, recent games count more): {wpg:.2f} pts per game")
+
+    g10 = team_games(team_id, code, n=10)
+    home_g = [g for g in g10 if g[0]]
+    away_g = [g for g in g10 if not g[0]]
+    if g10:
+        hcs = sum(1 for g in home_g if g[2] == 0)
+        acs = sum(1 for g in away_g if g[2] == 0)
+        lines.append(f"  Clean sheets, last {len(g10)} league games: "
+                     f"home {hcs} of {len(home_g)}, away {acs} of {len(away_g)}")
+
+    raw = team_finished(team_id, FOOTBALL_KEY) or []
+    now = datetime.now(timezone.utc)
+    recent14 = sum(
+        1 for g in raw
+        if (now - datetime.fromisoformat(g["utcDate"].replace("Z", "+00:00"))).days <= 14
+    )
+    lines.append(f"  Matches in the last 14 days (all competitions): {recent14}")
+
+    if not lines:
+        return ""
+    return f"{team_name} (extra):\n" + "\n".join(lines)
+
+def league_home_record(code):
+    """This season's results in the league as a whole, so the venue effect comes from the data."""
+    games = []
+    for m in finished_matches(code, FOOTBALL_KEY):
+        ft = (m.get("score") or {}).get("fullTime") or {}
+        if ft.get("home") is not None and ft.get("away") is not None:
+            games.append((ft["home"], ft["away"]))
+    if len(games) < 20:
+        return ""
+    n = len(games)
+    hw = sum(1 for h, a in games if h > a)
+    aw = sum(1 for h, a in games if h < a)
+    dr = n - hw - aw
+    return (f"League record this season ({n} finished matches): home wins {hw / n:.0%}, "
+            f"draws {dr / n:.0%}, away wins {aw / n:.0%}.")
+
 def prediction_context(code, home_name, away_name):
     """Full context for a named match: both team profiles plus head-to-head."""
     table, _ = league_table(code, FOOTBALL_KEY)
@@ -979,8 +1077,11 @@ def prediction_context(code, home_name, away_name):
     if not h or not a:
         return "Could not match both teams in this league's table."
     parts = [
+        league_home_record(code),
         team_profile(h["id"], h["name"], code),
+        team_extras(code, h["id"], h["name"]),
         team_profile(a["id"], a["name"], code),
+        team_extras(code, a["id"], a["name"]),
         head_to_head(h["id"], a["id"], h["name"], a["name"]),
     ]
     return "\n\n".join(p for p in parts if p)
@@ -1053,6 +1154,9 @@ SYSTEM_PROMPT = (
     "Never mention missing, unavailable or unknown data, and never say what you do not know. "
     "Simply leave out anything the data does not cover, and talk only about what is there. "
     "Never assume any player is fit or injured. "
+    "Treat the home and away teams equally. Playing at home is an advantage only where the "
+    "league record or the team figures show it, so never add an edge for the home side on its own. "
+    "Base every reason on the data given, and when the data points to the away side, say so. "
     "When model figures are provided, use exactly the percentages given and do not change them. "
     "Give three short reasons that cite the figures. Never present a prediction as "
     "certain, never give betting tips, and never encourage betting. If asked about betting, "
@@ -1431,7 +1535,8 @@ def ask(text_in, label, league_code, attachment=None):
         instruction = (
             f"\n\nUse exactly these percentages: Home win {figs['p_home']}%, "
             f"Draw {figs['p_draw']}%, Away win {figs['p_away']}%. Do not change them. "
-            "Then give three short reasons that cite the figures above."
+            "Treat both teams the same way. Then give three short reasons that cite the figures above, "
+            "including any where the away side is stronger."
         )
     else:
         context = match_context(league_code)
