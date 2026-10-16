@@ -1431,7 +1431,11 @@ def prob_bars(home, away, probs):
 def model_figures(code, home, away):
     """Elo and Poisson figures for a match, from the league's finished matches."""
     matches = sorted(finished_matches(code, FOOTBALL_KEY), key=lambda m: m["utcDate"])
-    return model_predict(matches, home["id"], away["id"])
+    figs = model_predict(matches, home["id"], away["id"])
+    if figs:
+        # Use the fixture's own team names, so a team with no finished matches still shows correctly
+        figs["home"], figs["away"] = home["name"], away["name"]
+    return figs
 
 def figures_block(f):
     """The model's figures as plain text for Gemini to explain."""
