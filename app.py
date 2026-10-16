@@ -5,18 +5,16 @@ import math
 import wave
 import struct
 import html
-import hmac
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 import requests
 import streamlit as st
 from google import genai
 from google.genai import types
 from supabase import create_client
 from model import predict as model_predict
-from mpesa import stk_push, normalise_phone
+
 
 def get_secret(name, default=""):
     value = os.environ.get(name)
@@ -27,10 +25,13 @@ def get_secret(name, default=""):
     except Exception:
         return default
 
+
 ADMIN_EMAIL = get_secret("ADMIN_EMAIL").strip().lower()
+
 
 def is_owner(email):
     return bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
+
 
 MODEL = "gemini-flash-lite-latest"          # analysis model
 TRANSCRIBE_MODEL = "gemini-flash-latest"    # speech to text
@@ -44,10 +45,9 @@ APP_TITLE = f"⚽ {APP_NAME}"
 APP_TAGLINE = "Fixtures, form, and match analysis across top leagues. Ask by text, voice, or screenshot."
 APP_ROLE_TAG = "Match Analyst"
 HISTORY_LIMIT = 20
-PACK_SIZE = 5             # prediction credits per access code
-CREDIT_KSH = 20           # shillings per prediction credit (PAY_PRICE should equal PACK_SIZE * CREDIT_KSH)
-REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is redeemed
-MIN_AGE = 18
+PACK_SIZE = 5             # prediction credits per pack
+CREDIT_KSH = 20           # shillings per prediction credit
+REFERRAL_CREDITS = 1      # free credits to the referrer when a referred friend's first pack is credited
 NEW_CHAT_TITLE = "New chat"
 EAT = timezone(timedelta(hours=3))  # Nairobi time
 RECENT_N = 8        # finished matches per team used for form
@@ -83,9 +83,6 @@ GENERAL_KEYWORDS = [
     "table", "fixture", "fixtures", "form", "schedule", "explain",
     "history", "head to head", "standings",
 ]
-
-# Terms are kept in terms.md, next to app.py, so they are easy to update and review
-TERMS = (Path(__file__).parent / "terms.md").read_text(encoding="utf-8")
 
 st.set_page_config(page_title=APP_NAME, page_icon="⚽", layout="centered")
 
@@ -205,15 +202,12 @@ div[data-testid="stHorizontalBlock"] .stButton > button {
 .stTextInput input { border-radius: 10px; padding: 0.4rem 0.6rem; }
 div[data-testid="stPopover"] button { border-radius: 10px; padding: 0.25rem 0.5rem; }
 .attach-note { color: #1D4ED8; font-size: 0.82rem; font-weight: 600; margin: 0; }
-.terms-small, .terms-small p, .terms-small li { font-size: 0.8rem; line-height: 1.4; color: #334155; }
 </style>
 """, unsafe_allow_html=True)
 
 # ---------- Session state ----------
-st.session_state.setdefault("accepted_terms", False)
-st.session_state.setdefault("age_ok", False)
-st.session_state.setdefault("age_blocked", False)
 st.session_state.setdefault("user_email", None)
+st.session_state.setdefault("user_name", None)
 st.session_state.setdefault("conv_id", None)
 st.session_state.setdefault("messages", [])
 st.session_state.setdefault("last_audio", None)
@@ -278,47 +272,22 @@ def count_unique_signins():
     rows = sb.table("events").select("email").eq("kind", "signin").execute().data
     return len({r["email"] for r in rows if r.get("email")})
 
-def hash_pass(passcode, salt_hex):
-    return hashlib.pbkdf2_hmac(
-        "sha256", passcode.encode(), bytes.fromhex(salt_hex), 200_000
-    ).hex()
-
-def get_user(email):
-    res = sb.table("users").select("salt,pass_hash").eq("email", email).execute()
-    return res.data[0] if res.data else None
-
-def sign_in(email, passcode, ref_in=""):
-    """Returns (ok, message). Creates the account the first time an email is used.
-    ref_in is an optional referral code, used only for brand-new accounts."""
-    email = email.strip().lower()
+def sign_in(email, username):
+    """Returns (ok, message). Creates the account the first time an email is used and saves the username."""
+    email = (email or "").strip().lower()
     if "@" not in email or "." not in email:
         return False, "Please enter a valid email address."
-    user = get_user(email)
-    if user:
-        if hmac.compare_digest(hash_pass(passcode, user["salt"]), user["pass_hash"]):
-            return True, email
-        return False, "Wrong passcode for this email."
-    if len(passcode) < 6:
-        return False, "Choose a passcode of at least 6 characters."
-    salt = secrets.token_hex(16)
-    sb.table("users").insert({
-        "email": email,
-        "salt": salt,
-        "pass_hash": hash_pass(passcode, salt),
-        "ref_code": secrets.token_hex(4).upper(),
-        "created": now_iso(),
-    }).execute()
-
-    # Link the new account to whoever shared the referral code
-    ref_in = (ref_in or "").strip().upper()
-    if ref_in:
-        referrer = sb.table("users").select("email").eq("ref_code", ref_in).execute().data
-        if referrer and referrer[0]["email"] != email:
-            sb.table("referrals").insert({
-                "referee": email, "referrer": referrer[0]["email"],
-            }).execute()
-
-    log_event("signup", email)
+    existing = sb.table("users").select("email").eq("email", email).execute().data
+    if existing:
+        sb.table("users").update({"username": username}).eq("email", email).execute()
+    else:
+        sb.table("users").insert({
+            "email": email,
+            "username": username,
+            "ref_code": secrets.token_hex(4).upper(),
+            "created": now_iso(),
+        }).execute()
+        log_event("signup", email)
     return True, email
 
 def track_line():
@@ -449,8 +418,8 @@ def ensure_token():
         sb.table("sessions").insert({
             "token": tok,
             "email": st.session_state.get("user_email"),
-            "terms_ok": bool(st.session_state.get("accepted_terms", False)),
-            "age_ok": bool(st.session_state.get("age_ok", False)),
+            "terms_ok": True,
+            "age_ok": True,
             "conv_id": st.session_state.get("conv_id"),
             "created": now_iso(),
         }).execute()
@@ -459,7 +428,7 @@ def ensure_token():
     return tok
 
 def save_progress(**fields):
-    """Save progress (terms, age, email, chat) so a refresh brings the user back to the same place."""
+    """Save progress (email, chat) so a refresh brings the user back to the same place."""
     tok = ensure_token()
     sb.table("sessions").update(fields).eq("token", tok).execute()
 
@@ -480,9 +449,10 @@ if not st.session_state.restored:
         if rows:
             row = rows[0]
             st.session_state.token = tok
-            st.session_state.accepted_terms = bool(row["terms_ok"])
-            st.session_state.age_ok = bool(row["age_ok"])
             st.session_state.user_email = row["email"]
+            urow = sb.table("users").select("username").eq("email", row["email"]).execute().data
+            saved_name = urow[0].get("username") if urow else None
+            st.session_state.user_name = saved_name or (row["email"] or "").split("@")[0]
             st.session_state.conv_id = row["conv_id"]
             if row["conv_id"]:
                 st.session_state.messages = load_conv_messages(row["conv_id"])
@@ -521,7 +491,7 @@ def get_my_ref_code(email):
     return code
 
 def reward_referrer(email):
-    """Called after a referred friend's first paid redemption. Rewards only once."""
+    """Called after a referred friend's first credited pack. Rewards only once."""
     rows = (sb.table("referrals").select("referrer")
             .eq("referee", email).eq("rewarded", False).execute().data)
     if not rows:
@@ -535,7 +505,7 @@ def reward_referrer(email):
     ledger_add(referrer, "referral", REFERRAL_CREDITS, "Friend's first pack")
 
 def redeem_code(email, code):
-    code = code.strip()
+    code = (code or "").strip()
     if code not in CODES:
         return False, "That code is not valid. Check it and try again."
     if sb.table("redemptions").select("code").eq("code", code).execute().data:
@@ -550,66 +520,58 @@ def redeem_code(email, code):
     reward_referrer(email)
     return True, f"{PACK_SIZE} prediction credits added (KSh {PACK_SIZE * CREDIT_KSH})."
 
-# ---------- Step 1: terms ----------
-if not st.session_state.accepted_terms:
-    st.markdown(f'<div class="terms-small">{TERMS}</div>', unsafe_allow_html=True)
-    agree = st.checkbox("I have read and accept the terms.")
-    if st.button("Continue", disabled=not agree):
-        st.session_state.accepted_terms = True
-        save_progress(terms_ok=True)
-        st.rerun()
-    st.stop()
+def owner_credit(buyer, ref, packs):
+    """Owner adds credits after checking a PayBill payment. Each confirmation code works once."""
+    buyer = (buyer or "").strip().lower()
+    ref = (ref or "").strip().upper()
+    if "@" not in buyer or not ref:
+        return False, "Enter the buyer's email and the M-Pesa confirmation code."
+    marker = f"MPESA:{ref}"
+    if sb.table("redemptions").select("code").eq("code", marker).execute().data:
+        return False, f"Code {ref} has already been credited."
+    sb.table("redemptions").insert({"code": marker, "email": buyer, "created": now_iso()}).execute()
+    sb.table("wallet").upsert({"email": buyer, "credits": get_credits(buyer) + packs * PACK_SIZE}).execute()
+    ledger_add(buyer, "top_up", packs * PACK_SIZE, f"PayBill {ref}")
+    reward_referrer(buyer)
+    return True, f"Added {packs * PACK_SIZE} credits to {buyer}."
 
-# ---------- Step 2: age check ----------
-if st.session_state.age_blocked:
-    st.error(f"Sorry, you must be {MIN_AGE} or older to use {APP_NAME}, so you can't continue.")
-    st.stop()
+CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
+PAY_PRICE = get_secret("PAY_PRICE", "100")
+PAYBILL_NUMBER = get_secret("PAYBILL_NUMBER", "not set")
+ACCOUNT_NUMBER = get_secret("ACCOUNT_NUMBER", "not set")
 
-if not st.session_state.age_ok:
-    st.markdown("### Confirm your age")
-    with st.form("age"):
-        age_txt = st.text_input("How old are you?", placeholder="e.g. 21")
-        age_submit = st.form_submit_button("Continue")
-    if age_submit:
-        age_clean = age_txt.strip()
-        if not age_clean.isdigit() or not (1 <= int(age_clean) <= 120):
-            st.error("Please enter your age as a number.")
-        elif int(age_clean) < MIN_AGE:
-            st.session_state.age_blocked = True
-            st.rerun()
-        else:
-            st.session_state.age_ok = True
-            save_progress(age_ok=True)
-            st.rerun()
-    st.stop()
-
-# ---------- Step 3: sign in ----------
+# ---------- Step 1: sign in with email and username ----------
 if not st.session_state.user_email:
-    st.markdown("### Sign in to keep your conversations")
-    st.caption("New here? Enter an email and choose a passcode. Returning? Use the same passcode.")
+    st.markdown("### Sign in")
+    st.caption("Enter your email and a username to continue.")
     with st.form("signin"):
         email_in = st.text_input("Email")
-        pass_in = st.text_input("Passcode (at least 6 characters)", type="password")
-        ref_txt = st.text_input("Referral code (optional, new accounts only)")
+        name_in = st.text_input("Username")
         submitted = st.form_submit_button("Continue")
     if submitted:
-        ok, result = sign_in(email_in, pass_in, ref_txt)
-        if ok:
-            log_event("signin", result)
-            st.session_state.user_email = result
-            # Every sign-in starts a fresh chat; older chats stay in the sidebar
-            st.session_state.conv_id = create_conversation(result)
-            st.session_state.messages = []
-            st.session_state.paywall = False
-            st.session_state.pop("chat", None)
-            save_progress(email=result, conv_id=st.session_state.conv_id)
-            st.rerun()
+        if not name_in.strip():
+            st.error("Please enter a username.")
         else:
-            st.error(result)
+            ok, result = sign_in(email_in, name_in.strip())
+            if ok:
+                st.session_state.user_email = result
+                st.session_state.user_name = name_in.strip()
+                log_event("signin", result)
+                # Every sign-in starts a fresh chat; older chats stay in the sidebar
+                st.session_state.conv_id = create_conversation(result)
+                st.session_state.messages = []
+                st.session_state.paywall = False
+                st.session_state.pop("chat", None)
+                save_progress(email=result, conv_id=st.session_state.conv_id)
+                st.rerun()
+            else:
+                st.error(result)
     st.stop()
 
 # ---------- Sidebar: account, chats, balance ----------
-st.sidebar.markdown(f"**Signed in as**  \n{st.session_state.user_email}")
+st.sidebar.markdown(
+    f"**Signed in as**  \n{st.session_state.user_name}  \n{st.session_state.user_email}"
+)
 
 if is_owner(st.session_state.user_email):
     st.sidebar.markdown("**Account balance:** unlimited (owner)")
@@ -648,11 +610,10 @@ if st.sidebar.button("🗑️ Delete all my chats"):
 if st.sidebar.button("Sign out"):
     end_session()
     st.session_state.user_email = None
+    st.session_state.user_name = None
     st.session_state.conv_id = None
     st.session_state.messages = []
     st.session_state.paywall = False
-    st.session_state.accepted_terms = False
-    st.session_state.age_ok = False
     st.session_state.pop("chat", None)
     st.rerun()
 
@@ -716,14 +677,7 @@ if not key:
     st.error("The app is not set up yet (API key missing).")
     st.stop()
 
-CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
-PAY_LINK = get_secret("PAY_LINK")
 FOOTBALL_KEY = get_secret("FOOTBALL_API_KEY").strip()
-
-# Payment details (set in Streamlit secrets, never in code)
-PAY_PRICE = get_secret("PAY_PRICE", "100")
-PAYBILL_NUMBER = get_secret("PAYBILL_NUMBER", "not set")
-ACCOUNT_NUMBER = get_secret("ACCOUNT_NUMBER", "not set")
 
 @st.cache_resource
 def get_client():
@@ -1031,18 +985,6 @@ def prediction_context(code, home_name, away_name):
     ]
     return "\n\n".join(p for p in parts if p)
 
-def find_teams_in_question(code, text):
-    """Return (home, away) names if the question names two teams in this league."""
-    table, _ = league_table(code, FOOTBALL_KEY)
-    if not table:
-        return None
-    t = text.lower()
-    found = [row["team"]["name"] for row in table
-             if row["team"]["name"].lower() in t or row["team"].get("shortName", "").lower() in t]
-    if len(found) >= 2:
-        return found[0], found[1]
-    return None
-
 def find_team_rows(code, text):
     """Return (home, away) team dicts in the order named in the question."""
     table, _ = league_table(code, FOOTBALL_KEY)
@@ -1060,16 +1002,6 @@ def find_team_rows(code, text):
     if len(hits) >= 2:
         return hits[0][1], hits[1][1]
     return None
-
-def parse_probs(text):
-    t = text.lower()
-    def grab(label):
-        m = re.search(label + r"[^\d%\n]{0,25}?(\d+(?:\.\d+)?)\s*%", t)
-        return float(m.group(1)) if m else None
-    h, d, a = grab(r"home win"), grab(r"draw"), grab(r"away win")
-    if None in (h, d, a):
-        return None
-    return h, d, a
 
 def log_prediction(email, code, home, away, probs):
     sb.table("predictions").insert({
@@ -1401,29 +1333,6 @@ def figures_block(f):
         f"Poisson probabilities: home win {f['p_home']}%, draw {f['p_draw']}%, away win {f['p_away']}%"
     )
 
-def start_mpesa_payment(email, phone):
-    """Send the STK prompt and record it, so the callback knows who to credit."""
-    phone = normalise_phone(phone)
-    amount = PACK_SIZE * CREDIT_KSH
-    status, body = stk_push(
-        get_secret("DARAJA_ENV", "sandbox"),
-        get_secret("DARAJA_CONSUMER_KEY"), get_secret("DARAJA_CONSUMER_SECRET"),
-        get_secret("DARAJA_SHORTCODE"), get_secret("DARAJA_PASSKEY"),
-        get_secret("DARAJA_CALLBACK_URL"),
-        phone, amount, "MATCHDAY",
-    )
-    if status == 200 and body.get("ResponseCode") == "0":
-        sb.table("mpesa_payments").insert({
-            "checkout_request_id": body["CheckoutRequestID"],
-            "email": email,
-            "amount": amount,
-            "status": "pending",
-            "created": now_iso(),
-        }).execute()
-        return True, ("Check your phone and enter your M-Pesa PIN. "
-                      "Credits are added automatically once payment is confirmed.")
-    return False, f"Payment could not start: {body.get('errorMessage', 'unknown error')}"
-
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
@@ -1676,31 +1585,22 @@ if st.session_state.messages:
             st.audio(st.session_state.pending_voice, format="audio/wav", autoplay=True)
             st.session_state.pending_voice = None
 
-# ---------- Paywall: M-Pesa STK push, access code fallback ----------
+# ---------- Paywall: manual PayBill and access code ----------
 if st.session_state.paywall:
     amount = PACK_SIZE * CREDIT_KSH
     st.info(f"Predictions use credits. {PACK_SIZE} credits cost KSh {amount}.")
-
-    with st.form("stk_pay"):
-        pay_phone = st.text_input("Your M-Pesa number (07... or 2547...)")
-        pay_go = st.form_submit_button(f"Pay KSh {amount} with M-Pesa")
-    if pay_go:
-        ok, msg = start_mpesa_payment(st.session_state.user_email, pay_phone)
-        (st.success if ok else st.error)(msg)
-
-    st.caption("Having trouble? Pay the paybill manually below and enter your access code.")
-    st.markdown(
-        f"**Pay with M-Pesa manually**\n\n"
-        f"1. Go to **Lipa na M-Pesa → Paybill**\n"
-        f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
-        f"3. Account number: **{ACCOUNT_NUMBER}**\n"
-        f"4. Amount: **KSh {PAY_PRICE}**\n"
-        f"5. Enter your PIN, then fill in the form with your M-Pesa code."
-    )
-
-    if PAY_LINK:
-        st.link_button("Open payment form", PAY_LINK, use_container_width=True)
-
+    if PAYBILL_NUMBER == "not set" or ACCOUNT_NUMBER == "not set":
+        st.warning("Payment details are not set up yet. Please check back soon.")
+    else:
+        st.markdown(
+            f"**Pay with M-Pesa**\n\n"
+            f"1. Go to **Lipa na M-Pesa → Paybill**\n"
+            f"2. Paybill number: **{PAYBILL_NUMBER}**\n"
+            f"3. Account number: **{ACCOUNT_NUMBER}**\n"
+            f"4. Amount: **KSh {amount}**\n"
+            f"5. Enter your PIN, then send us your M-Pesa confirmation code and your email. "
+            f"Credits are added after we check the payment."
+        )
     with st.form("redeem"):
         code_in = st.text_input("Enter your access code", type="password")
         redeem_submit = st.form_submit_button("Add credits")
@@ -1712,7 +1612,7 @@ if st.session_state.paywall:
         else:
             st.error(msg)
 
-# ---------- Owner stats (only visible to ADMIN_EMAIL) ----------
+# ---------- Owner stats and PayBill crediting (only visible to ADMIN_EMAIL) ----------
 if is_owner(st.session_state.user_email):
     with st.sidebar.expander("📊 Owner stats"):
         packs = count_rows("redemptions")
@@ -1732,3 +1632,12 @@ if is_owner(st.session_state.user_email):
         st.metric("Correct", ps["correct"])
         st.metric("Wrong", ps["wrong"])
         st.metric("Awaiting result", ps["pending"])
+        st.divider()
+        st.markdown("**Credit a PayBill payment**")
+        with st.form("owner_credit"):
+            buyer_in = st.text_input("Buyer's email")
+            ref_in = st.text_input("M-Pesa confirmation code")
+            packs_in = st.number_input("Packs (KSh 100 each)", min_value=1, max_value=20, value=1, step=1)
+            if st.form_submit_button("Add credits"):
+                ok, msg = owner_credit(buyer_in, ref_in, int(packs_in))
+                (st.success if ok else st.error)(msg)
