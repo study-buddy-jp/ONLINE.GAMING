@@ -124,7 +124,14 @@ def start_payment(phone):
         st.error("Enter a valid Safaricom number, e.g. 0712345678.")
         return
     try:
-        resp = stk_push(msisdn, PACK_PRICE_KES, f"Credits {PACK_CREDITS}")
+        resp = stk_push(
+            shortcode=get_secret("DARAJA_SHORTCODE"),
+            passkey=get_secret("DARAJA_PASSKEY"),
+            callback_url=get_secret("DARAJA_CALLBACK_URL"),
+            phone=msisdn,
+            amount=PACK_PRICE_KES,
+            account_ref=f"CREDITS{PACK_CREDITS}",
+        )
     except Exception as e:
         st.error(f"Could not start M-Pesa payment: {e}")
         return
@@ -156,6 +163,26 @@ def redeem_code(code):
     sb.table("redemptions").insert({"code": code, "email": EMAIL}).execute()
     change_credits(EMAIL, PACK_CREDITS, "access code")
     st.success(f"Added {PACK_CREDITS} credits.")
+
+
+def manual_payment_steps():
+    paybill = get_secret("PAYBILL_NUMBER")
+    account = get_secret("ACCOUNT_NUMBER")
+    if not paybill or not account:
+        st.info("Manual payment is not set up yet.")
+        return
+    st.markdown(
+        f"""
+**Pay manually with M-Pesa**
+
+1. Go to **M-Pesa → Lipa na M-Pesa → Pay Bill**
+2. Business number: **{paybill}**
+3. Account number: **{account}**
+4. Amount: **KSh {PACK_PRICE_KES}**
+5. Enter your M-Pesa PIN and confirm.
+6. Copy the M-Pesa confirmation code from the SMS and send it to us with your email. Credits are added after we check the payment.
+"""
+    )
 
 
 def paywall_forms(suffix):
@@ -314,6 +341,7 @@ with tab_predict:
             f"You have {current_balance} credits. A prediction needs {PREDICTION_COST}. "
             f"Pay below to get {PACK_CREDITS} credits, or enter an access code."
         )
+        manual_payment_steps()
         paywall_forms("main")
     else:
         st.write(
