@@ -1224,6 +1224,11 @@ NO_HISTORY = {
     "sw": "Hakuna historia ya kutosha ya mechi kwa timu hizi mbili kwenye ligi hii bado, kwa hiyo hakuna utabiri na salio halijatumika.",
 }
 
+NO_TEAMS = {
+    "en": "To get a prediction, name two teams from this league, for example 'Arsenal vs Chelsea'. No credit was used.",
+    "sw": "Ili kupata utabiri, taja timu mbili kutoka ligi hii, kwa mfano 'Arsenal vs Chelsea'. Salio halijatumika.",
+}
+
 RESULT_WORDS = ["result", "score", "outcome", "finished", "full time",
                 "accuracy", "record", "percentage", "how many"]
 MINE_WORDS = [
@@ -1359,6 +1364,12 @@ def ask(text_in, label, league_code, attachment=None):
     paid = needs_credit(text_in)
     pair = find_team_rows(league_code, text_in) if paid else None
 
+    # A prediction needs two teams from this league. Without them there are no figures,
+    # so stop here before any credit is spent.
+    if paid and not pair:
+        add_message("assistant", NO_TEAMS[st.session_state.lang])
+        return
+
     # Run the model before charging, so no credit is spent on a match it cannot cover
     figs = None
     if paid and pair:
@@ -1492,11 +1503,69 @@ def render_home(league_code):
                     )
 
 # ---------- League and reply mode ----------
-c_league, c_mode = st.columns([3, 2], vertical_alignment="center")
+c_league, c_mode, c_menu = st.columns([3, 2, 1], vertical_alignment="center")
 with c_league:
     st.selectbox("League", list(LEAGUES.keys()), key="league")
 with c_mode:
     st.radio("Reply", REPLY_MODES, key="reply_mode", horizontal=True)
+
+# ---------- Menu: new chart, previous charts, record, account, where to pay ----------
+with c_menu:
+    with st.popover("⋮"):
+        st.button("➕ New chart", key="menu_new", on_click=start_new_chat, use_container_width=True)
+        st.button("🏠 Home", key="menu_home", on_click=go_home, use_container_width=True)
+
+        st.markdown("**Previous charts**")
+        menu_convs = list_conversations(st.session_state.user_email)
+        if not menu_convs:
+            st.caption("No previous charts yet.")
+        for conv_id, title in menu_convs[:10]:
+            st.button(
+                title,
+                key=f"menu_conv_{conv_id}",
+                on_click=open_chat,
+                args=(conv_id,),
+                use_container_width=True,
+            )
+
+        st.divider()
+        st.markdown(stats_card(prediction_stats(st.session_state.user_email), "My record"),
+                    unsafe_allow_html=True)
+
+        st.markdown("**Account**")
+        if is_owner(st.session_state.user_email):
+            st.write("Balance: unlimited (owner)")
+        else:
+            m_credits, m_history = account_view(st.session_state.user_email)
+            st.write(f"Balance: KSh {m_credits * CREDIT_KSH} ({m_credits} prediction credits)")
+            with st.expander("Account history"):
+                for h in m_history:
+                    sign = "+" if h["credits"] > 0 else ""
+                    when = h["created"][:16].replace("T", " ")
+                    st.write(f"{when}  \n{h['note']}: {sign}{h['credits']} credit(s)")
+                if not m_history:
+                    st.caption("No activity yet.")
+
+            st.markdown("**Where to pay**")
+            if PAYBILL_NUMBER == "not set" or ACCOUNT_NUMBER == "not set":
+                st.caption("Payment details are not set up yet. Please check back soon.")
+            else:
+                st.markdown(
+                    f"1. Go to **Lipa na M-Pesa → Paybill**  \n"
+                    f"2. Paybill number: **{PAYBILL_NUMBER}**  \n"
+                    f"3. Account number: **{ACCOUNT_NUMBER}**  \n"
+                    f"4. Amount: **KSh {PACK_SIZE * CREDIT_KSH}** for {PACK_SIZE} credits  \n"
+                    f"5. Send us your M-Pesa confirmation code and your email. "
+                    f"Credits are added after we check the payment."
+                )
+            with st.form("menu_redeem"):
+                menu_code = st.text_input("Access code", type="password")
+                if st.form_submit_button("Add credits"):
+                    ok, msg = redeem_code(st.session_state.user_email, menu_code)
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(msg)
 
 league_code = LEAGUES[st.session_state.league]
 
