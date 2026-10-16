@@ -1481,6 +1481,65 @@ def fixture_pick(code, text):
     away = {"id": x["awayTeam"]["id"], "name": x["awayTeam"]["name"]}
     return (home, away), None
 
+BATCH_MAX = 10   # most matches "predict all" covers in one request, so one request cannot use up hundreds of credits
+ALL_RE = re.compile(r"\b(all|every|above|these|those|them)\b")
+NO_FIXTURES = {
+    "en": "There are no upcoming matches listed for this league right now.",
+    "sw": "Hakuna mechi zijazo zilizoorodheshwa kwa ligi hii sasa hivi.",
+}
+NEED_CREDITS = {
+    "en": "Predicting these {n} matches uses {n} credits, and you have {have}. Add credits to continue.",
+    "sw": "Kutabiri mechi hizi {n} kunatumia salio la {n}, nawe una {have}. Ongeza salio ili kuendelea.",
+}
+PRED_TITLE = {"en": "Predictions for the next matches", "sw": "Utabiri wa mechi zijazo"}
+
+def upcoming_fixtures(code):
+    matches, _ = league_fixtures(code, FOOTBALL_KEY)
+    return sorted(matches or [], key=lambda x: x["utcDate"])
+
+def fixture_pair(x):
+    home = {"id": x["homeTeam"]["id"], "name": x["homeTeam"]["name"]}
+    away = {"id": x["awayTeam"]["id"], "name": x["awayTeam"]["name"]}
+    return home, away
+
+def predict_all(code):
+    """Predict the next upcoming matches in one table. Each match uses one credit."""
+    email = st.session_state.user_email
+    lang = st.session_state.lang
+    upcoming = upcoming_fixtures(code)[:BATCH_MAX]
+    if not upcoming:
+        add_message("assistant", NO_FIXTURES[lang])
+        return
+    count = len(upcoming)
+    if not is_owner(email) and get_credits(email) < count:
+        st.session_state.paywall = True
+        add_message("assistant", NEED_CREDITS[lang].format(n=count, have=get_credits(email)))
+        return
+    rows = []
+    for x in upcoming:
+        home, away = fixture_pair(x)
+        figs = model_figures(code, home, away)
+        if figs is None:
+            continue
+        probs = (figs["p_home"], figs["p_draw"], figs["p_away"])
+        if not is_owner(email):
+            spend_credit(email)
+        log_prediction(email, code, home, away, probs)
+        rows.append(
+            "<tr>"
+            f"<td>{fmt_kickoff(x['utcDate'])}</td>"
+            f"<td class='name'>{html.escape(home['name'])} vs {html.escape(away['name'])}</td>"
+            f"<td>{probs[0]:.0f}%</td>"
+            f"<td>{probs[1]:.0f}%</td>"
+            f"<td>{probs[2]:.0f}%</td>"
+            "</tr>"
+        )
+    if not rows:
+        add_message("assistant", NO_FIXTURES[lang])
+        return
+    title = f'<div class="quick-title">{PRED_TITLE[lang]} ({len(rows)})</div>'
+    add_message("table", title + dtable(["Kickoff (Nairobi)", "Match", "Home", "Draw", "Away"], rows))
+
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
@@ -1505,6 +1564,12 @@ def ask(text_in, label, league_code, attachment=None):
             return
 
     paid = needs_credit(text_in)
+
+    # "predict all", "predict the above matches": one prediction per upcoming match
+    if paid and ALL_RE.search(text_in.lower()):
+        predict_all(league_code)
+        return
+
     pair = None
     if paid:
         # "the first match" or "match 2" picks from the upcoming list; otherwise use the team names
@@ -1514,11 +1579,15 @@ def ask(text_in, label, league_code, attachment=None):
             return
         pair = picked or find_team_rows(league_code, text_in)
 
-    # A prediction needs two teams from this league. Without them there are no figures,
-    # so stop here before any credit is spent.
+    # No match named: predict the next upcoming match, so the user never has to type team names
     if paid and not pair:
-        add_message("assistant", NO_TEAMS[st.session_state.lang])
-        return
+        upcoming = upcoming_fixtures(league_code)
+        if not upcoming:
+            add_message("assistant", NO_FIXTURES[st.session_state.lang])
+            return
+        pair = fixture_pair(upcoming[0])
+        add_message("table", f'<p class="disclaimer">No match named, so this is the next one: '
+                             f'{html.escape(pair[0]["name"])} vs {html.escape(pair[1]["name"])}.</p>')
 
     # Run the model before charging, so no credit is spent on a match it cannot cover
     figs = None
