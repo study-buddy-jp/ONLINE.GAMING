@@ -1483,6 +1483,18 @@ def fixture_pick(code, text):
 
 BATCH_MAX = 10   # most matches "predict all" covers in one request, so one request cannot use up hundreds of credits
 ALL_RE = re.compile(r"\b(all|every|above|these|those|them)\b")
+WORD_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+COUNT_RE = re.compile(r"\b(\d{1,2}|" + "|".join(WORD_NUMBERS) + r")\s+(?:upcoming\s+|next\s+)?(games?|matches?|fixtures?)\b")
+
+def count_requested(text):
+    """'predict 5 games' -> 5. Returns None when no number of matches is named."""
+    m = COUNT_RE.search(text.lower())
+    if not m:
+        return None
+    v = m.group(1)
+    return int(v) if v.isdigit() else WORD_NUMBERS[v]
+
 NO_FIXTURES = {
     "en": "There are no upcoming matches listed for this league right now.",
     "sw": "Hakuna mechi zijazo zilizoorodheshwa kwa ligi hii sasa hivi.",
@@ -1502,11 +1514,11 @@ def fixture_pair(x):
     away = {"id": x["awayTeam"]["id"], "name": x["awayTeam"]["name"]}
     return home, away
 
-def predict_all(code):
-    """Predict the next upcoming matches in one table. Each match uses one credit."""
+def predict_all(code, n=BATCH_MAX):
+    """Predict the next n upcoming matches (the ones shown on screen) in one table. Each match uses one credit."""
     email = st.session_state.user_email
     lang = st.session_state.lang
-    upcoming = upcoming_fixtures(code)[:BATCH_MAX]
+    upcoming = upcoming_fixtures(code)[:max(1, min(n, BATCH_MAX))]
     if not upcoming:
         add_message("assistant", NO_FIXTURES[lang])
         return
@@ -1564,10 +1576,12 @@ def ask(text_in, label, league_code, attachment=None):
             return
 
     paid = needs_credit(text_in)
+    owner = is_owner(email)
 
-    # "predict all", "predict the above matches": one prediction per upcoming match
-    if paid and ALL_RE.search(text_in.lower()):
-        predict_all(league_code)
+    # Owner only: "predict 5 games" or "predict all" predicts the upcoming matches shown on screen
+    n_requested = count_requested(text_in)
+    if paid and owner and (n_requested or ALL_RE.search(text_in.lower())):
+        predict_all(league_code, n_requested or BATCH_MAX)
         return
 
     pair = None
@@ -1579,7 +1593,12 @@ def ask(text_in, label, league_code, attachment=None):
             return
         pair = picked or find_team_rows(league_code, text_in)
 
-    # No match named: predict the next upcoming match, so the user never has to type team names
+    # Other users must name the two teams. The owner gets the next upcoming match by default.
+    if paid and not pair and not owner:
+        add_message("assistant", NO_TEAMS[st.session_state.lang])
+        return
+
+    # Owner, no match named: predict the next upcoming match
     if paid and not pair:
         upcoming = upcoming_fixtures(league_code)
         if not upcoming:
