@@ -1234,7 +1234,8 @@ RESULT_WORDS = ["result", "score", "outcome", "finished", "full time",
 MINE_WORDS = [
     "my prediction", "my predictions", "predictions were", "predicted", "i predicted",
     "today's predictions", "todays predictions", "past predictions", "previous predictions",
-    "my picks",
+    "my picks", "my previous", "my outcomes", "my results", "what did i predict",
+    "what i predicted", "my history",
 ]
 
 def results_intent(text):
@@ -1338,6 +1339,40 @@ def figures_block(f):
         f"Poisson probabilities: home win {f['p_home']}%, draw {f['p_draw']}%, away win {f['p_away']}%"
     )
 
+ORDINALS = {
+    "first": 1, "1st": 1, "second": 2, "2nd": 2, "third": 3, "3rd": 3,
+    "fourth": 4, "4th": 4, "fifth": 5, "5th": 5, "sixth": 6, "6th": 6,
+    "seventh": 7, "7th": 7, "eighth": 8, "8th": 8, "ninth": 9, "9th": 9,
+    "tenth": 10, "10th": 10,
+}
+ORDINAL_RE = re.compile(r"\b(" + "|".join(ORDINALS) + r")\s+(?:upcoming\s+)?(match|game|fixture)\b")
+NUMBER_RE = re.compile(r"\b(match|game|fixture)\s*(?:no\.?|number|#)?\s*(\d{1,2})\b")
+COUNT_LINE = {
+    "en": "This league has {n} upcoming matches. Ask for one of them, for example 'predict the first match'. No credit was used.",
+    "sw": "Ligi hii ina mechi {n} zijazo. Omba mojawapo, kwa mfano 'tabiri mechi ya kwanza'. Salio halijatumika.",
+}
+
+def fixture_pick(code, text):
+    """Pick a match by its place in the upcoming list ('the second match', 'match 3').
+    Returns (pair, error_text). pair is None when the text names no position."""
+    t = text.lower()
+    m = ORDINAL_RE.search(t)
+    if m:
+        n = ORDINALS[m.group(1)]
+    else:
+        m2 = NUMBER_RE.search(t)
+        if not m2:
+            return None, None
+        n = int(m2.group(2))
+    matches, _ = league_fixtures(code, FOOTBALL_KEY)
+    upcoming = sorted(matches or [], key=lambda x: x["utcDate"])
+    if n < 1 or n > len(upcoming):
+        return None, COUNT_LINE[st.session_state.get("lang", "en")].format(n=len(upcoming))
+    x = upcoming[n - 1]
+    home = {"id": x["homeTeam"]["id"], "name": x["homeTeam"]["name"]}
+    away = {"id": x["awayTeam"]["id"], "name": x["awayTeam"]["name"]}
+    return (home, away), None
+
 def ask(text_in, label, league_code, attachment=None):
     email = st.session_state.user_email
     add_message("user", label)
@@ -1362,7 +1397,14 @@ def ask(text_in, label, league_code, attachment=None):
             return
 
     paid = needs_credit(text_in)
-    pair = find_team_rows(league_code, text_in) if paid else None
+    pair = None
+    if paid:
+        # "the first match" or "match 2" picks from the upcoming list; otherwise use the team names
+        picked, pick_err = fixture_pick(league_code, text_in)
+        if pick_err:
+            add_message("assistant", pick_err)
+            return
+        pair = picked or find_team_rows(league_code, text_in)
 
     # A prediction needs two teams from this league. Without them there are no figures,
     # so stop here before any credit is spent.
