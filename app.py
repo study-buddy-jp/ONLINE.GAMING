@@ -1719,6 +1719,18 @@ with c_menu:
                     else:
                         st.error(msg)
 
+        # Owner only: credit a PayBill payment from inside the menu, so it works on a phone
+        if is_owner(st.session_state.user_email):
+            st.markdown("**Owner: credit a PayBill payment**")
+            with st.form("menu_owner_credit"):
+                o_buyer = st.text_input("Buyer's email")
+                o_ref = st.text_input("M-Pesa confirmation code")
+                o_packs = st.number_input("Packs (5 credits each)", min_value=1, max_value=20,
+                                          value=1, step=1)
+                if st.form_submit_button("Add credits"):
+                    ok, msg = owner_credit(o_buyer, o_ref, int(o_packs))
+                    (st.success if ok else st.error)(msg)
+
 league_code = LEAGUES[st.session_state.league]
 
 # ---------- Start screen (empty chat) or chat box (has messages) ----------
