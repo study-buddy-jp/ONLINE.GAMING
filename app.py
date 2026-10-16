@@ -1505,7 +1505,8 @@ def render_home(league_code):
 # ---------- League and reply mode ----------
 c_league, c_mode, c_menu = st.columns([3, 2, 1], vertical_alignment="center")
 with c_league:
-    st.selectbox("League", list(LEAGUES.keys()), key="league")
+    # Switching league opens a fresh chat for that league. The old chat stays in Previous charts.
+    st.selectbox("League", list(LEAGUES.keys()), key="league", on_change=start_new_chat)
 with c_mode:
     st.radio("Reply", REPLY_MODES, key="reply_mode", horizontal=True)
 
