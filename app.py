@@ -535,6 +535,38 @@ def owner_credit(buyer, ref, packs):
     reward_referrer(buyer)
     return True, f"Added {packs * PACK_SIZE} credits to {buyer}."
 
+MPESA_CODE_RE = re.compile(r"\b([A-Z0-9]{10})\s+Confirmed", re.IGNORECASE)
+MPESA_AMOUNT_RE = re.compile(r"Ksh\s?([\d,]+(?:\.\d{1,2})?)", re.IGNORECASE)
+
+def parse_mpesa(text):
+    """Read the confirmation code and the amount from a pasted M-Pesa message."""
+    c = MPESA_CODE_RE.search(text or "")
+    a = MPESA_AMOUNT_RE.search(text or "")
+    code = c.group(1).upper() if c else None
+    amount = int(float(a.group(1).replace(",", ""))) if a else None
+    return code, amount
+
+def submit_payment_message(email, text):
+    """A customer pastes their M-Pesa message. It waits in the owner's inbox until checked."""
+    text = (text or "").strip()
+    if len(text) < 20:
+        return False, "Paste the whole M-Pesa confirmation message."
+    code, amount = parse_mpesa(text)
+    if not code:
+        return False, "We could not find the confirmation code. Paste the full M-Pesa message, which starts with the code."
+    sb.table("payment_messages").insert({
+        "email": email, "message": text, "code": code, "amount": amount,
+        "status": "pending", "created": now_iso(),
+    }).execute()
+    return True, "Received. Credits are added once we check your payment."
+
+def pending_payment_messages():
+    return (sb.table("payment_messages").select("*").eq("status", "pending")
+            .order("id", desc=True).limit(20).execute().data)
+
+def set_payment_status(row_id, status):
+    sb.table("payment_messages").update({"status": status, "handled": now_iso()}).eq("id", row_id).execute()
+
 CODES = [c.strip() for c in get_secret("ACCESS_CODES").split(",") if c.strip()]
 PAY_PRICE = get_secret("PAY_PRICE", "100")
 PAYBILL_NUMBER = get_secret("PAYBILL_NUMBER", "not set")
@@ -1094,7 +1126,10 @@ def find_team_rows(code, text):
     t = text.lower()
     hits = []
     for row in table:
-        for name in (row["team"]["name"], row["team"].get("shortName") or ""):
+        full = row["team"]["name"]
+        # Also match the name without "FC" or "AFC", so "Fulham" and "Hull City" are found
+        base = re.sub(r"\s+(fc|afc)$", "", full, flags=re.IGNORECASE)
+        for name in (full, row["team"].get("shortName") or "", base):
             i = t.find(name.lower()) if name else -1
             if i >= 0:
                 hits.append((i, row["team"]))
@@ -1154,6 +1189,9 @@ SYSTEM_PROMPT = (
     "Never mention missing, unavailable or unknown data, and never say what you do not know. "
     "Simply leave out anything the data does not cover, and talk only about what is there. "
     "Never assume any player is fit or injured. "
+    "Never ask the user for model figures, statistics, Elo ratings or match data, because the app "
+    "gathers all of that itself. If a user asks for a prediction without naming two teams, tell them "
+    "to name two teams from this league, for example 'Arsenal vs Chelsea'. "
     "Treat the home and away teams equally. Playing at home is an advantage only where the "
     "league record or the team figures show it, so never add an edge for the home side on its own. "
     "Base every reason on the data given, and when the data points to the away side, say so. "
@@ -1576,6 +1614,9 @@ def ask(text_in, label, league_code, attachment=None):
             return
 
     paid = needs_credit(text_in)
+    # Two team names in one message, such as "fulham vs hull city", is a prediction request
+    if not paid and find_team_rows(league_code, text_in):
+        paid = True
     owner = is_owner(email)
 
     # Owner only: "predict 5 games" or "predict all" predicts the upcoming matches shown on screen
@@ -1806,9 +1847,50 @@ with c_menu:
                         st.rerun()
                     else:
                         st.error(msg)
+            st.markdown("**Paid by M-Pesa? Send us your confirmation message**")
+            st.caption("Paste the whole message you got from M-Pesa. We add your credits after we check it.")
+            with st.form("menu_paid_msg"):
+                pay_msg = st.text_area("M-Pesa message", height=120)
+                if st.form_submit_button("Send to us"):
+                    ok, msg = submit_payment_message(st.session_state.user_email, pay_msg)
+                    (st.success if ok else st.error)(msg)
 
-        # Owner only: credit a PayBill payment from inside the menu, so it works on a phone
+        # Owner only: payment inbox and PayBill crediting from inside the menu, so it works on a phone
         if is_owner(st.session_state.user_email):
+            inbox = pending_payment_messages()
+            st.markdown(f"**Payment messages ({len(inbox)} waiting)**")
+            if not inbox:
+                st.caption("No payment messages waiting.")
+            for row in inbox:
+                code, amount = row.get("code"), row.get("amount")
+                suggested = max(1, (amount or 0) // (PACK_SIZE * CREDIT_KSH))
+                with st.container(border=True):
+                    when = (row.get("created") or "")[:16].replace("T", " ")
+                    st.markdown(
+                        f"**{html.escape(row['email'])}**  \n"
+                        f"Paid: KSh {amount if amount is not None else 'not found'}  \n"
+                        f"Code: {code or 'not found'}  \n"
+                        f"Sent: {when}"
+                    )
+                    with st.expander("Show full message"):
+                        st.text(row["message"])
+                    packs = st.number_input(f"Packs (5 credits each)", min_value=1, max_value=20,
+                                            value=suggested, step=1, key=f"pk_{row['id']}")
+                    c_credit, c_dismiss = st.columns(2)
+                    with c_credit:
+                        if st.button("Credit", key=f"cr_{row['id']}", disabled=not code,
+                                     use_container_width=True):
+                            ok, msg = owner_credit(row["email"], code, int(packs))
+                            if ok:
+                                set_payment_status(row["id"], "credited")
+                                st.rerun()
+                            else:
+                                st.error(msg)
+                    with c_dismiss:
+                        if st.button("Dismiss", key=f"ds_{row['id']}", use_container_width=True):
+                            set_payment_status(row["id"], "dismissed")
+                            st.rerun()
+            st.divider()
             st.markdown("**Owner: credit a PayBill payment**")
             with st.form("menu_owner_credit"):
                 o_buyer = st.text_input("Buyer's email")
