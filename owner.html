@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Owner Control Panel</title>
+    <style>
+        body { background: #0b0e14; color: #fff; font-family: 'Segoe UI', Arial, sans-serif; padding: 30px; margin: 0; }
+        h2 { margin-top: 0; }
+        .status { font-size: 0.9rem; color: #64748b; margin-bottom: 20px; }
+        .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+        .card { background: #151a24; padding: 20px; border-radius: 8px; border: 1px solid #222b3c; }
+        .label { color: #94a3b8; font-size: 0.9rem; }
+        .number { font-size: 24px; font-weight: bold; color: #22c55e; margin-top: 10px; }
+        @media (max-width: 800px) { .stats-grid { grid-template-columns: 1fr; } }
+    </style>
+    <script src="/socket.io/socket.io.js"></script>
+</head>
+<body>
+    <h2>📈 Live Game Performance Dashboard</h2>
+    <div class="status" id="conn-status">Connecting...</div>
+
+    <div class="stats-grid">
+        <div class="card">
+            <div class="label">Total Volume Transacted</div>
+            <div id="stat-bets" class="number" style="color: #3b82f6;">$0.00</div>
+        </div>
+        <div class="card">
+            <div class="label">Total Player Payouts</div>
+            <div id="stat-payouts" class="number" style="color: #a855f7;">$0.00</div>
+        </div>
+        <div class="card">
+            <div class="label">Net House Revenue (GGR)</div>
+            <div id="stat-profit" class="number">$0.00</div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io("http://127.0.0.1:3000");
+        const statusEl = document.getElementById("conn-status");
+
+        // The key is asked for each time the page opens, so it is not stored in the page
+        const ownerKey = prompt("Enter owner key:");
+
+        function money(n) {
+            return "$" + Number(n).toFixed(2);
+        }
+
+        socket.on("connect", () => {
+            statusEl.innerText = "Connected. Authenticating...";
+            socket.emit("auth_as_owner", ownerKey);
+        });
+
+        socket.on("disconnect", () => {
+            statusEl.innerText = "Disconnected from server.";
+        });
+
+        socket.on("owner_stats_update", (metrics) => {
+            statusEl.innerText = "Live";
+            document.getElementById("stat-bets").textContent = money(metrics.totalBets);
+            document.getElementById("stat-payouts").textContent = money(metrics.totalPayouts);
+
+            const profitDiv = document.getElementById("stat-profit");
+            profitDiv.textContent = money(metrics.houseProfit);
+            profitDiv.style.color = metrics.houseProfit >= 0 ? "#22c55e" : "#ef4444";
+        });
+    </script>
+</body>
+</html>
