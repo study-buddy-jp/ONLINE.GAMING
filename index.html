@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aviator Engine - Multi-Bet & Lobby Edition</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; background-color: #0b0b0d; color: #ffffff; margin: 0; display: flex; justify-content: center; align-items: center; height: 100vh; padding: 20px; box-sizing: border-box; }
+
+        #app-wrapper { display: flex; gap: 20px; width: 950px; height: 680px; }
+
+        /* Left Side: Live Multiplayer Lobby list */
+        #lobby-side { width: 320px; background-color: #14141a; border-radius: 16px; border: 1px solid #232329; display: flex; flex-direction: column; overflow: hidden; }
+        .lobby-header { padding: 15px; border-bottom: 1px solid #232329; font-weight: bold; text-transform: uppercase; font-size: 0.9rem; letter-spacing: 1px; color: #94a3b8; display: flex; justify-content: space-between; }
+        #player-list { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+        .player-row { display: flex; justify-content: space-between; align-items: center; padding: 10px; background-color: #0b0b0d; border-radius: 8px; border: 1px solid #1c1c22; transition: all 0.2s; }
+        .player-info { display: flex; flex-direction: column; gap: 2px; }
+        .player-name { font-size: 0.9rem; font-weight: 600; color: #e2e8f0; }
+        .player-stake { font-size: 0.8rem; color: #64748b; }
+        .player-status { font-size: 0.85rem; font-weight: bold; color: #64748b; padding: 3px 8px; border-radius: 6px; }
+        .status-cashed { color: #121214; background-color: #f59e0b; box-shadow: 0 0 10px rgba(245, 158, 11, 0.2); }
+        .status-flying { color: #f59e0b; }
+        .status-lost { color: #ef4444; }
+
+        /* Right Side: Primary Flight Canvas Deck and Dual Betting Cockpits */
+        #flight-side { flex: 1; display: flex; flex-direction: column; gap: 15px; }
+        #game-container { background-color: #14141a; padding: 20px; border-radius: 16px; border: 1px solid #232329; flex: 1; display: flex; flex-direction: column; }
+
+        #history-bar { display: flex; gap: 8px; overflow-x: auto; background-color: #0b0b0d; padding: 8px; border-radius: 8px; margin-bottom: 12px; border: 1px solid #1c1c22; min-height: 24px; }
+        .history-pill { padding: 4px 10px; border-radius: 12px; font-size: 0.85rem; font-weight: bold; background-color: #1e1e24; }
+        .pill-low { color: #38bdf8; background-color: rgba(56, 189, 248, 0.12); }
+        .pill-high { color: #c084fc; background-color: rgba(192, 132, 252, 0.12); }
+
+        #radar-wrapper { position: relative; width: 100%; height: 200px; background-color: #0b0b0d; border-radius: 12px; border: 1px solid #1c1c22; margin-bottom: 12px; overflow: hidden; }
+        canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        #multiplier-display { position: absolute; width: 100%; top: 35%; left: 0; font-size: 4rem; font-weight: 900; pointer-events: none; z-index: 10; text-align: center; font-variant-numeric: tabular-nums; }
+        .flying { color: #f59e0b; text-shadow: 0 0 25px rgba(245, 158, 11, 0.4); animation: pulseFlight 0.6s infinite alternate ease-in-out; }
+        .crashed { color: #ef4444; text-shadow: 0 0 25px rgba(239, 68, 68, 0.4); animation: shakeCrash 0.4s ease-in-out; }
+
+        #wallet-display { background-color: #1a1a24; padding: 10px 14px; border-radius: 8px; font-weight: bold; color: #10b981; font-size: 1.1rem; border-left: 4px solid #10b981; text-align: left; margin-bottom: 10px; }
+        #status-row { display: flex; justify-content: space-between; align-items: center; }
+        #status { font-size: 0.95rem; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; text-align: left; }
+        .sound-btn { background-color: #1a1a24; color: #94a3b8; border: 1px solid #232329; border-radius: 6px; padding: 4px 10px; font-size: 0.8rem; font-weight: bold; cursor: pointer; }
+        .sound-btn:hover { border-color: #f59e0b; }
+
+        /* Bottom Row: Dual Cockpit Columns */
+        #cockpit-row { display: flex; gap: 15px; }
+        .betting-pod { flex: 1; background-color: #14141a; border-radius: 16px; border: 1px solid #232329; padding: 15px; box-sizing: border-box; }
+
+        /* Auto Config Section Styling */
+        .auto-section { display: flex; flex-direction: column; gap: 8px; background-color: #0b0b0d; padding: 10px; border-radius: 8px; border: 1px solid #1c1c22; margin-bottom: 10px; }
+        .toggle-row { display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem; font-weight: bold; color: #94a3b8; }
+        .switch { position: relative; display: inline-block; width: 34px; height: 20px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #29292e; transition: .2s; border-radius: 20px; }
+        .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; transition: .2s; border-radius: 50%; }
+        input:checked + .slider { background-color: #f59e0b; }
+        input:checked + .slider:before { transform: translateX(14px); }
+
+        .auto-inputs { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: #64748b; margin-top: 4px; border-top: 1px solid #1c1c22; padding-top: 6px; }
+        .auto-cash-input { width: 65px; padding: 4px; background-color: #14141a; border: 1px solid #232329; border-radius: 4px; color: white; text-align: center; font-size: 0.85rem; font-weight: bold; }
+
+        /* Stake controls: minus, amount, plus */
+        .stake-controls { display: flex; gap: 8px; margin-bottom: 8px; }
+        input[type="number"].stake-field { flex: 1; padding: 10px; border-radius: 6px; border: 1px solid #232329; background-color: #0b0b0d; color: white; font-size: 1.1rem; text-align: center; font-weight: bold; }
+        input[type="number"].stake-field:disabled { opacity: 0.6; }
+        .step-btn { width: 48px; background-color: #232329; color: #ffffff; border: none; border-radius: 6px; font-size: 1.4rem; font-weight: bold; cursor: pointer; }
+        .step-btn:hover:not(:disabled) { background-color: #2e2e36; }
+
+        /* Quick amount chips */
+        .quick-chips { display: flex; gap: 8px; margin-bottom: 10px; }
+        .chip { flex: 1; padding: 6px; background-color: #1e1e24; color: #e2e8f0; border: 1px solid #232329; border-radius: 6px; font-weight: bold; font-size: 0.85rem; cursor: pointer; }
+        .chip:hover:not(:disabled) { border-color: #f59e0b; }
+        .step-btn:disabled, .chip:disabled { opacity: 0.35; cursor: not-allowed; }
+
+        .btn { width: 100%; padding: 14px; font-size: 1.2rem; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase; transition: all 0.1s; }
+        .btn-bet { background-color: #ef4444; color: #ffffff; }
+        .btn-bet:hover { background-color: #dc2626; }
+        .btn-cashout { background-color: #f59e0b; color: #121214; font-size: 1.15rem; }
+        .btn-cashout:hover { background-color: #d97706; }
+        .btn-disabled { background-color: #232329; color: #4b5563; cursor: not-allowed; }
+        .btn-flying { background-color: #6366f1; color: #ffffff; cursor: not-allowed; }
+
+        @keyframes shakeCrash { 0%, 100% { transform: translateX(0); } 20%, 60% { transform: translateX(-4px); } 40%, 80% { transform: translateX(4px); } }
+        @keyframes pulseFlight { 0% { transform: scale(1); } 100% { transform: scale(1.03); } }
+    </style>
+</head>
+<body>
+
+    <div id="app-wrapper">
+        <!-- LEFT SIDEBAR: Scrolling User Feed -->
+        <div id="lobby-side">
+            <div class="lobby-header">
+                <span>All Bets</span>
+                <span id="active-count" style="color:#f59e0b">0</span>
+            </div>
+            <div id="player-list">
+                <!-- Peer player rows get injected here dynamically -->
+            </div>
+        </div>
+
+        <!-- RIGHT SIDEBAR: Primary Flight Deck Workspace -->
+        <div id="flight-side">
+            <div id="game-container">
+                <div id="history-bar"></div>
+                <div id="radar-wrapper">
+                    <canvas id="flightCanvas"></canvas>
+                    <div id="multiplier-display" class="flying">1.00x</div>
+                </div>
+                <div id="wallet-display">Wallet Balance: $100.00</div>
+                <div id="status-row">
+                    <div id="status">CONNECTING...</div>
+                    <button id="sound-toggle" class="sound-btn">Sound: On</button>
+                </div>
+            </div>
+
+            <!-- DUAL COCKPIT ROW CONTAINER -->
+            <div id="cockpit-row">
+                <!-- PANEL A -->
+                <div class="betting-pod" id="pod-A">
+                    <div class="auto-section">
+                        <div class="toggle-row">
+                            <span>Auto Bet</span>
+                            <label class="switch"><input type="checkbox" id="autobet-A"><span class="slider"></span></label>
+                        </div>
+                        <div class="toggle-row" style="margin-top: 4px;">
+                            <span>Auto Cash Out</span>
+                            <label class="switch"><input type="checkbox" id="autocash-enable-A"><span class="slider"></span></label>
+                        </div>
+                        <div class="auto-inputs">
+                            <span>Target Rate:</span>
+                            <input type="number" id="autocash-val-A" class="auto-cash-input" value="2.00" step="0.1" min="1.01">
+                        </div>
+                    </div>
+                    <div class="stake-controls">
+                        <button class="step-btn" data-stake-id="A" data-delta="-10">−</button>
+                        <input type="number" id="bet-amount-A" class="stake-field" value="10" min="1">
+                        <button class="step-btn" data-stake-id="A" data-delta="10">+</button>
+                    </div>
+                    <div class="quick-chips">
+                        <button class="chip" data-stake-id="A" data-amount="10">10</button>
+                        <button class="chip" data-stake-id="A" data-amount="1000">1000</button>
+                        <button class="chip" data-stake-id="A" data-amount="2500">2500</button>
+                    </div>
+                    <button id="action-btn-A" class="btn btn-disabled" disabled>WAITING</button>
+                </div>
+
+                <!-- PANEL B -->
+                <div class="betting-pod" id="pod-B">
+                    <div class="auto-section">
+                        <div class="toggle-row">
+                            <span>Auto Bet</span>
+                            <label class="switch"><input type="checkbox" id="autobet-B"><span class="slider"></span></label>
+                        </div>
+                        <div class="toggle-row" style="margin-top: 4px;">
+                            <span>Auto Cash Out</span>
+                            <label class="switch"><input type="checkbox" id="autocash-enable-B"><span class="slider"></span></label>
+                        </div>
+                        <div class="auto-inputs">
+                            <span>Target Rate:</span>
+                            <input type="number" id="autocash-val-B" class="auto-cash-input" value="1.50" step="0.1" min="1.01">
+                        </div>
+                    </div>
+                    <div class="stake-controls">
+                        <button class="step-btn" data-stake-id="B" data-delta="-10">−</button>
+                        <input type="number" id="bet-amount-B" class="stake-field" value="10" min="1">
+                        <button class="step-btn" data-stake-id="B" data-delta="10">+</button>
+                    </div>
+                    <div class="quick-chips">
+                        <button class="chip" data-stake-id="B" data-amount="10">10</button>
+                        <button class="chip" data-stake-id="B" data-amount="1000">1000</button>
+                        <button class="chip" data-stake-id="B" data-amount="2500">2500</button>
+                    </div>
+                    <button id="action-btn-B" class="btn btn-disabled" disabled>WAITING</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Connects to the same server that serves this page
+        const socket = io();
+
+        let currentBalance = 100.00;
+        let currentMultiplier = 1.00;
+        let flightState = "WAITING";
+
+        let pods = {
+            A: { hasBet: false, stake: 0, cashed: false },
+            B: { hasBet: false, stake: 0, cashed: false }
+        };
+
+        let lobbyPlayers = [];
+        const firstNames = ["James","Alex","Sarah","David","Emma","John","Daniel","Grace","Michael","Linda"];
+
+        const walletDiv = document.getElementById("wallet-display");
+        const statusDiv = document.getElementById("status");
+        const multiplierDiv = document.getElementById("multiplier-display");
+        const playerListContainer = document.getElementById("player-list");
+        const activeCountSpan = document.getElementById("active-count");
+        const historyBar = document.getElementById("history-bar");
+        const soundToggle = document.getElementById("sound-toggle");
+
+        const canvas = document.getElementById("flightCanvas");
+        const ctx = canvas.getContext("2d");
+        function resizeCanvas() { canvas.width = canvas.parentElement.clientWidth; canvas.height = canvas.parentElement.clientHeight; }
+        resizeCanvas();
+
+        /* ---------- SOUND (synthesized with Web Audio, no files needed) ---------- */
+        let soundOn = true;
+        let audioCtx = null;
+        let engineNodes = null;   // non-null while the flight music is playing
+        let musicTimer = null;
+        let nextNoteTime = 0;
+        let noteIndex = 0;
+
+        function getAudio() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === "suspended") audioCtx.resume();
+            return audioCtx;
+        }
+        // Browsers only allow sound after the user clicks or taps once
+        document.addEventListener("pointerdown", () => { try { getAudio(); } catch (e) {} }, { once: true });
+
+        // Plays one note at an exact time on the audio clock
+        function playNoteAt(t, freq, type, dur, vol) {
+            const ac = getAudio();
+            const osc = ac.createOscillator();
+            const gain = ac.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, t);
+            gain.gain.setValueAtTime(0.0001, t);
+            gain.gain.exponentialRampToValueAtTime(vol, t + 0.02);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+            osc.connect(gain);
+            gain.connect(ac.destination);
+            osc.start(t);
+            osc.stop(t + dur + 0.05);
+        }
+
+        function playTone(freq, type, duration, volume, delay = 0, endFreq = null) {
+            if (!soundOn) return;
+            const ac = getAudio();
+            const t = ac.currentTime + delay;
+            const osc = ac.createOscillator();
+            const gain = ac.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, t);
+            if (endFreq) osc.frequency.exponentialRampToValueAtTime(endFreq, t + duration);
+            gain.gain.setValueAtTime(0.0001, t);
+            gain.gain.exponentialRampToValueAtTime(volume, t + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, t + duration);
+            osc.connect(gain);
+            gain.connect(ac.destination);
+            osc.start(t);
+            osc.stop(t + duration + 0.05);
+        }
+
+        // Flight music: a bouncy bassline, a kick on each beat and a melody that repeats.
+        // The tempo rises as the multiplier grows.
+        const NOTES = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25]; // C major
+        const MELODY = [0, 2, 4, 2, 5, 4, 2, -1,  1, 3, 5, 3, 4, 2, 0, -1];            // -1 = rest
+        const BASS = [130.81, 98.00, 110.00, 123.47];                                    // C, G, A, B
+
+        function scheduleEighth(t, i) {
+            const ac = getAudio();
+            const step = i % 16;
+
+            const mel = MELODY[step];
+            if (mel >= 0) playNoteAt(t, NOTES[mel], "triangle", 0.3, 0.09);
+
+            if (step % 4 === 0) {
+                playNoteAt(t, BASS[Math.floor(i / 16) % BASS.length], "sine", 0.45, 0.14);
+
+                // Kick drum: a short falling tone
+                const osc = ac.createOscillator();
+                const gain = ac.createGain();
+                osc.frequency.setValueAtTime(140, t);
+                osc.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+                gain.gain.setValueAtTime(0.3, t);
+                gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.15);
+                osc.connect(gain);
+                gain.connect(ac.destination);
+                osc.start(t);
+                osc.stop(t + 0.16);
+            }
+        }
+
+        function musicTick() {
+            if (!engineNodes || !audioCtx) return;
+            while (nextNoteTime < audioCtx.currentTime + 0.15) {
+                scheduleEighth(nextNoteTime, noteIndex);
+                const beat = 60 / (100 + Math.min(currentMultiplier, 10) * 8);
+                nextNoteTime += beat / 2;
+                noteIndex++;
+            }
+        }
+
+        function startEngine() {
+            if (!soundOn || engineNodes) return;
+            getAudio();
+            engineNodes = {};
+            nextNoteTime = audioCtx.currentTime + 0.05;
+            noteIndex = 0;
+            musicTimer = setInterval(musicTick, 25);
+            musicTick();
+        }
+
+        function stopEngine() {
+            if (!engineNodes) return;
+            clearInterval(musicTimer);
+            musicTimer = null;
+            engineNodes = null;
+        }
+
+        function playBetSound() { playTone(520, "square", 0.06, 0.06); }
+
+        // Applause: a crowd swell with many hand claps scattered over about two seconds
+        function playApplause() {
+            if (!soundOn) return;
+            const ac = getAudio();
+            const t0 = ac.currentTime;
+
+            // Crowd murmur swelling up and fading out
+            const crowdLen = Math.floor(ac.sampleRate * 2.2);
+            const cb = ac.createBuffer(1, crowdLen, ac.sampleRate);
+            const cd = cb.getChannelData(0);
+            for (let i = 0; i < crowdLen; i++) cd[i] = Math.random() * 2 - 1;
+            const crowd = ac.createBufferSource();
+            crowd.buffer = cb;
+            const crowdFilter = ac.createBiquadFilter();
+            crowdFilter.type = "bandpass";
+            crowdFilter.frequency.value = 1000;
+            crowdFilter.Q.value = 0.6;
+            const crowdGain = ac.createGain();
+            crowdGain.gain.setValueAtTime(0.0001, t0);
+            crowdGain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.4);
+            crowdGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.2);
+            crowd.connect(crowdFilter);
+            crowdFilter.connect(crowdGain);
+            crowdGain.connect(ac.destination);
+            crowd.start(t0);
+            crowd.stop(t0 + 2.3);
+
+            // Individual hand claps, denser at the start
+            const clapLen = Math.floor(ac.sampleRate * 0.06);
+            const kb = ac.createBuffer(1, clapLen, ac.sampleRate);
+            const kd = kb.getChannelData(0);
+            for (let i = 0; i < clapLen; i++) kd[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / clapLen, 3);
+            for (let k = 0; k < 70; k++) {
+                const t = t0 + Math.pow(Math.random(), 1.6) * 1.8;
+                const src = ac.createBufferSource();
+                src.buffer = kb;
+                const bp = ac.createBiquadFilter();
+                bp.type = "bandpass";
+                bp.frequency.value = 1500 + Math.random() * 1500;
+                bp.Q.value = 1.0;
+                const g = ac.createGain();
+                g.gain.value = 0.25 + Math.random() * 0.35;
+                src.connect(bp);
+                bp.connect(g);
+                g.connect(ac.destination);
+                src.start(t);
+            }
+        }
+
+        // Crash: a noise burst that falls away, with a low thud
+        function playCrashSound() {
+            if (!soundOn) return;
+            const ac = getAudio();
+            const len = Math.floor(ac.sampleRate * 0.9);
+            const buf = ac.createBuffer(1, len, ac.sampleRate);
+            const data = buf.getChannelData(0);
+            for (let i = 0; i < len; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / len);
+            const src = ac.createBufferSource();
+            src.buffer = buf;
+            const filt = ac.createBiquadFilter();
+            filt.type = "lowpass";
+            filt.frequency.setValueAtTime(1200, ac.currentTime);
+            filt.frequency.exponentialRampToValueAtTime(120, ac.currentTime + 0.9);
+            const g = ac.createGain();
+            g.gain.value = 0.7;
+            src.connect(filt);
+            filt.connect(g);
+            g.connect(ac.destination);
+            src.start();
+            playTone(150, "sine", 0.7, 0.5, 0, 40);
+        }
+
+        soundToggle.addEventListener("click", () => {
+            soundOn = !soundOn;
+            soundToggle.innerText = soundOn ? "Sound: On" : "Sound: Off";
+            if (!soundOn) stopEngine();
+            else if (flightState === "IN_PROGRESS") startEngine();
+        });
+
+        /* ---------- STAKE CONTROLS ---------- */
+        function setStakeLocked(id, locked) {
+            const input = document.getElementById(`bet-amount-${id}`);
+            if (locked) input.setAttribute("disabled", "true");
+            else input.removeAttribute("disabled");
+            document.querySelectorAll(`[data-stake-id="${id}"]`).forEach(c => { c.disabled = locked; });
+        }
+
+        function adjustStake(id, delta) {
+            const input = document.getElementById(`bet-amount-${id}`);
+            if (input.disabled) return;
+            let v = parseFloat(input.value) || 0;
+            v = Math.max(1, Math.round((v + delta) * 100) / 100);
+            input.value = v;
+        }
+
+        function setStakeAmount(id, amount) {
+            const input = document.getElementById(`bet-amount-${id}`);
+            if (input.disabled) return;
+            input.value = amount;
+        }
+
+        document.querySelectorAll(".step-btn").forEach(b =>
+            b.addEventListener("click", () => adjustStake(b.dataset.stakeId, Number(b.dataset.delta))));
+        document.querySelectorAll(".chip").forEach(c =>
+            c.addEventListener("click", () => setStakeAmount(c.dataset.stakeId, Number(c.dataset.amount))));
+
+        /* ---------- GAME UI ---------- */
+        function updateWalletUI() { walletDiv.innerText = `Wallet Balance: $${currentBalance.toFixed(2)}`; }
+
+        function seedLobbyPlayers() {
+            playerListContainer.innerHTML = "";
+            lobbyPlayers = [];
+            let rCount = Math.floor(Math.random() * 5) + 6;
+
+            for(let i=0; i<rCount; i++) {
+                let name = firstNames[Math.floor(Math.random() * firstNames.length)] + "***" + Math.floor(Math.random()*90+10);
+                let stake = Math.floor(Math.random() * 45) + 5;
+                let botTarget = Math.round((1.1 + Math.random() * 4.5) * 100) / 100;
+
+                let row = document.createElement("div");
+                row.className = "player-row";
+                row.id = `bot-${i}`;
+                row.innerHTML = `
+                    <div class="player-info">
+                        <span class="player-name">${name}</span>
+                        <span class="player-stake">$${stake.toFixed(2)}</span>
+                    </div>
+                    <span class="player-status status-flying" id="bot-status-${i}">Flying...</span>
+                `;
+                playerListContainer.appendChild(row);
+                lobbyPlayers.push({ id: i, elementStatus: document.getElementById(`bot-status-${i}`), targetRate: botTarget, stake: stake, active: true });
+            }
+            activeCountSpan.innerText = rCount;
+        }
+
+        function checkLobbyPayouts(rate) {
+            lobbyPlayers.forEach(bot => {
+                if(bot.active && rate >= bot.targetRate) {
+                    bot.active = false;
+                    bot.elementStatus.className = "player-status status-cashed";
+                    bot.elementStatus.innerText = `$${(bot.stake * bot.targetRate).toFixed(2)}`;
+                }
+            });
+        }
+
+        function finalizeLobbyLosses() {
+            lobbyPlayers.forEach(bot => {
+                if(bot.active) {
+                    bot.active = false;
+                    bot.elementStatus.className = "player-status status-lost";
+                    bot.elementStatus.innerText = "Busted";
+                }
+            });
+        }
+
+        function setupPod(id) {
+            const btn = document.getElementById(`action-btn-${id}`);
+            btn.addEventListener("click", () => {
+                if (!pods[id].hasBet && btn.classList.contains("btn-bet")) {
+                    executeBetPlacement(id);
+                }
+                else if (pods[id].hasBet && btn.classList.contains("btn-cashout") && !pods[id].cashed) {
+                    executePodCashout(id);
+                }
+            });
+        }
+        setupPod("A"); setupPod("B");
+
+        function executeBetPlacement(id) {
+            const btn = document.getElementById(`action-btn-${id}`);
+            const stakeInput = document.getElementById(`bet-amount-${id}`);
+            const amount = parseFloat(stakeInput.value);
+
+            if (amount > 0 && amount <= currentBalance) {
+                currentBalance -= amount;
+                pods[id].stake = amount;
+                pods[id].hasBet = true;
+                pods[id].cashed = false;
+                updateWalletUI();
+
+                // Tell the server which pod placed the bet
+                socket.emit("place_bet", { amount: amount, pod: id });
+                btn.innerText = "BET CONFIRMED";
+                btn.className = "btn btn-disabled";
+                btn.setAttribute("disabled", "true");
+                setStakeLocked(id, true);
+                playBetSound();
+            } else {
+                alert(`Insufficient Balance for Pod ${id}!`);
+            }
+        }
+
+        function executePodCashout(id) {
+            const btn = document.getElementById(`action-btn-${id}`);
+            pods[id].cashed = true;
+            // Tell the server so it records the payout for the owner dashboard
+            socket.emit("cash_out", { pod: id });
+            let profit = Math.round((pods[id].stake * currentMultiplier) * 100) / 100;
+            currentBalance += profit;
+            updateWalletUI();
+
+            btn.innerText = `WON $${profit.toFixed(2)}`;
+            btn.className = "btn btn-disabled";
+            btn.setAttribute("disabled", "true");
+            pods[id].hasBet = false;
+            playApplause();
+        }
+
+        function processAutomatedBets(id) {
+            const autoChecked = document.getElementById(`autobet-${id}`).checked;
+            if(autoChecked && flightState === "WAITING" && !pods[id].hasBet) {
+                executeBetPlacement(id);
+            }
+        }
+
+        function processAutomatedCashouts(id, rate) {
+            const autoCashChecked = document.getElementById(`autocash-enable-${id}`).checked;
+            const targetRate = parseFloat(document.getElementById(`autocash-val-${id}`).value);
+            if(autoCashChecked && pods[id].hasBet && !pods[id].cashed && rate >= targetRate) {
+                executePodCashout(id);
+            }
+        }
+
+        // Graph loop: started once, keeps running for the life of the page
+        let flightProgress = 0;
+        function drawGraph() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.strokeStyle = "#14141a"; ctx.lineWidth = 1;
+            for(let i = 40; i < canvas.width; i += 40) { ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, canvas.height); ctx.stroke(); }
+            for(let i = 40; i < canvas.height; i += 40) { ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(canvas.width, i); ctx.stroke(); }
+
+            if (flightState === "IN_PROGRESS") {
+                flightProgress += 1.5;
+                let startX = 30; let startY = canvas.height - 30;
+                let currentX = startX + (flightProgress * 0.8);
+                let currentY = startY - Math.pow(flightProgress * 0.22, 1.5);
+
+                if (currentX > canvas.width - 40) currentX = canvas.width - 40;
+                if (currentY < 40) currentY = 40;
+
+                ctx.beginPath(); ctx.moveTo(startX, startY);
+                ctx.quadraticCurveTo(startX + (currentX - startX) * 0.5, startY, currentX, currentY);
+                ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 4; ctx.stroke();
+
+                ctx.fillStyle = "#ffffff"; ctx.beginPath(); ctx.arc(currentX, currentY, 6, 0, Math.PI * 2); ctx.fill();
+            }
+            requestAnimationFrame(drawGraph);
+        }
+        requestAnimationFrame(drawGraph);
+
+        socket.on("game_state", (data) => {
+            flightState = data.state;
+            if (data.state === "WAITING") {
+                stopEngine();
+                flightProgress = 0;
+                statusDiv.innerText = "PLACING BETS...";
+                statusDiv.style.color = "#ef4444";
+                multiplierDiv.innerText = "1.00x";
+                multiplierDiv.className = "flying";
+
+                seedLobbyPlayers();
+
+                ["A", "B"].forEach(id => {
+                    pods[id].hasBet = false;
+                    pods[id].cashed = false;
+
+                    const btn = document.getElementById(`action-btn-${id}`);
+
+                    btn.innerText = "PLACE BET";
+                    btn.className = "btn btn-bet";
+                    btn.removeAttribute("disabled");
+                    setStakeLocked(id, false);
+                    processAutomatedBets(id);
+                });
+            }
+            else if (data.state === "CRASHED") {
+                stopEngine();
+                playCrashSound();
+                statusDiv.innerText = "FLEW AWAY!";
+                statusDiv.style.color = "#ef4444";
+                multiplierDiv.innerText = data.finalMultiplier.toFixed(2) + "x";
+                multiplierDiv.className = "crashed";
+
+                finalizeLobbyLosses();
+
+                ["A", "B"].forEach(id => {
+                    const btn = document.getElementById(`action-btn-${id}`);
+                    btn.innerText = "CRASHED";
+                    btn.className = "btn btn-disabled";
+                    btn.setAttribute("disabled", "true");
+                    // A pod with a bet stays locked; an empty pod can set its amount for the next fly
+                    setStakeLocked(id, pods[id].hasBet);
+                });
+
+                const pill = document.createElement("div");
+                pill.className = `history-pill ${data.finalMultiplier >= 2.00 ? 'pill-high' : 'pill-low'}`;
+                pill.innerText = data.finalMultiplier.toFixed(2) + "x";
+                historyBar.insertBefore(pill, historyBar.firstChild);
+                if (historyBar.children.length > 10) historyBar.removeChild(historyBar.lastChild);
+            }
+            else if (data.state === "IN_PROGRESS") {
+                startEngine();
+                ["A", "B"].forEach(id => {
+                    const btn = document.getElementById(`action-btn-${id}`);
+                    // Keep a cashed-out pod's WON message
+                    if (pods[id].cashed) return;
+
+                    setStakeLocked(id, pods[id].hasBet);
+
+                    if (pods[id].hasBet) {
+                        btn.innerText = `CASH OUT ($${(pods[id].stake * 1.00).toFixed(2)})`;
+                        btn.className = "btn btn-cashout";
+                        btn.removeAttribute("disabled");
+                    } else {
+                        btn.innerText = "FLYING...";
+                        btn.className = "btn btn-flying";
+                        btn.setAttribute("disabled", "true");
+                    }
+                });
+            }
+        });
+
+        // Attach the interactive event listener when the DOM content locks in
+document.getElementById('initiate-deposit-btn').addEventListener('click', async () => {
+    const amountInput = document.getElementById('deposit-amount').value;
+    const phoneInput = document.getElementById('deposit-phone').value;
+    const feedbackText = document.getElementById('deposit-status-feedback');
+
+    // 1. Core Front-End Validation Check
+    if (!amountInput || !phoneInput) {
+        feedbackText.textContent = "⚠️ Please fill out both the amount and phone number fields.";
+        feedbackText.style.color = "#ef4444";
+        return;
+    }
+
+    if (!phoneInput.startsWith("254") || phoneInput.length !== 12) {
+        feedbackText.textContent = "⚠️ Invalid format. Phone number must start with 254 (e.g., 254712345678).";
+        feedbackText.style.color = "#ef4444";
+        return;
+    }
+
+    // 2. Transition button UI state to prevent multiple accidental click actions
+    const depositButton = document.getElementById('initiate-deposit-btn');
+    depositButton.disabled = true;
+    depositButton.textContent = "Processing... Please wait";
+    feedbackText.textContent = "🚀 Dispatching transaction bundle to network server...";
+    feedbackText.style.color = "#60a5fa";
+
+    try {
+        // Fetch current active local user token context if your system tracks it
+        const localUserIdentity = localStorage.getItem('username') || "User_Dev";
+
+        // 3. Fire the asynchronous checkout payload up to your Express endpoint
+        // NOTE: If using an alternative port or domain, ensure the URL path matches perfectly
+        const response = await fetch('/api/initiate-deposit', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                userId: localUserIdentity,
+                amount: parseFloat(amountInput),
+                phone: phoneInput
+            })
+        });
+
+        const data = await response.json();
+
+        // 4. Handle Server Response Actions
+        if (response.ok && data.status === "success") {
+            feedbackText.textContent = "📲 STK Push Sent! Please check your smartphone and enter your M-Pesa PIN to authorize.";
+            feedbackText.style.color = "#22c55e";
+        } else {
+            feedbackText.textContent = `❌ Deposit Initiation Failed: ${data.error || "Unknown Error"}`;
+            feedbackText.style.color = "#ef4444";
+            // Re-enable button so they can try again
+            depositButton.disabled = false;
+            depositButton.textContent = "Send STK Push Request";
+        }
+
+    } catch (error) {
+        console.error("Monetization transmission framework exception:", error);
+        feedbackText.textContent = "❌ Connection timed out. Is your backend game server currently running?";
+        feedbackText.style.color = "#ef4444";
+        depositButton.disabled = false;
+        depositButton.textContent = "Send STK Push Request";
+    }
+});
+        
+        // Listen for real-time wallet credits sent from the webhook endpoint
+socket.on('wallet_balance_updated', (data) => {
+    // Replace this string placeholder query selector with your actual balance element class/ID
+    const balanceDisplayElement = document.querySelector('.wallet-balance-indicator-text');
+    
+    if (balanceDisplayElement) {
+        // Automatically updates your screen value on the fly without refreshing the page!
+        balanceDisplayElement.innerText = `Wallet Balance: KES ${data.newBalance.toFixed(2)}`;
+    }
+});
+
+        socket.on("multiplier_update", (data) => {
+            currentMultiplier = parseFloat(data.multiplier);
+            if (isNaN(currentMultiplier)) currentMultiplier = 1.00;
+
+            multiplierDiv.innerText = currentMultiplier.toFixed(2) + "x";
+            statusDiv.innerText = "PLANE IS FLYING";
+            statusDiv.style.color = "#f59e0b";
+
+            checkLobbyPayouts(currentMultiplier);
+
+            ["A", "B"].forEach(id => {
+                if (pods[id].hasBet && !pods[id].cashed) {
+                    let livePayout = pods[id].stake * currentMultiplier;
+                    const btn = document.getElementById(`action-btn-${id}`);
+                    if(btn && btn.classList.contains("btn-cashout")) {
+                        btn.innerText = `CASH OUT ($${livePayout.toFixed(2)})`;
+                    }
+                    processAutomatedCashouts(id, currentMultiplier);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
